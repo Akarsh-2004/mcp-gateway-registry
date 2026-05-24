@@ -182,6 +182,22 @@ class Settings(BaseSettings):
     enable_wellknown_discovery: bool = True
     wellknown_cache_ttl: int = 300  # 5 minutes
 
+    # MCP OAuth discovery settings (RFC 9728 / RFC 8414)
+    mcp_https_required: bool = Field(
+        default=True,
+        description=(
+            "Require HTTPS for the canonical MCP resource URL advertised in PRM. "
+            "Set to false only in local/dev environments."
+        ),
+    )
+    mcp_resource_documentation_url: str | None = Field(
+        default=None,
+        description=(
+            "Override URL for the `resource_documentation` field in the PRM document. "
+            "Defaults to <registry_url>/docs/oauth when unset."
+        ),
+    )
+
     # OpenTelemetry / OTLP settings (metrics-service)
     otel_otlp_endpoint: str | None = None  # OTLP HTTP endpoint (e.g. https://otlp.example.com)
     otel_otlp_export_interval_ms: int = 30000  # OTLP export interval in milliseconds

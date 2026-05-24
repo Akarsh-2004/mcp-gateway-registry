@@ -787,6 +787,12 @@ class EntraIdProvider(AuthProvider):
             logger.error(f"Failed to poll device code token: {e}")
             raise ValueError(f"Device code token polling failed: {e}")
 
+    def authorization_server_metadata(self) -> dict[str, Any]:
+        """Return Entra ID's RFC 8414 metadata. Implemented in sub-issue A commit 4."""
+        raise NotImplementedError(
+            "Entra authorization_server_metadata() not yet implemented (issue #989 commit 4)"
+        )
+
     def get_provider_info(self) -> dict[str, Any]:
         """Get provider-specific information.
 

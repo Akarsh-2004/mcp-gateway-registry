@@ -394,6 +394,37 @@ class KeycloakProvider(AuthProvider):
             logger.error(f"Failed to get M2M token: {e}")
             raise ValueError(f"M2M token generation failed: {e}")
 
+    def authorization_server_metadata(self) -> dict[str, Any]:
+        """Return Keycloak's RFC 8414 metadata, with internal hostnames rewritten.
+
+        Keycloak's OpenID configuration is RFC 8414-shaped already. We fetch it
+        from the internal cluster URL but rewrite any browser-facing endpoints
+        onto the external URL so a discovery client lands on the correct host.
+        """
+        config = self._get_openid_configuration()
+        if self.keycloak_url == self.keycloak_external_url:
+            return dict(config)
+
+        rewritten: dict[str, Any] = dict(config)
+        for field in (
+            "issuer",
+            "authorization_endpoint",
+            "token_endpoint",
+            "userinfo_endpoint",
+            "jwks_uri",
+            "end_session_endpoint",
+            "introspection_endpoint",
+            "registration_endpoint",
+            "revocation_endpoint",
+            "device_authorization_endpoint",
+        ):
+            value = rewritten.get(field)
+            if isinstance(value, str) and value.startswith(self.keycloak_url):
+                rewritten[field] = value.replace(
+                    self.keycloak_url, self.keycloak_external_url, 1
+                )
+        return rewritten
+
     @lru_cache(maxsize=1)
     def _get_openid_configuration(self) -> dict[str, Any]:
         """Get OpenID Connect configuration from Keycloak."""

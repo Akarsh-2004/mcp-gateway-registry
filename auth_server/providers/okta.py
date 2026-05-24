@@ -555,6 +555,12 @@ class OktaProvider(AuthProvider):
             logger.error(f"Failed to get M2M token: {e}")
             raise ValueError(f"M2M token generation failed: {e}")
 
+    def authorization_server_metadata(self) -> dict[str, Any]:
+        """Return Okta's RFC 8414 metadata. Implemented in sub-issue A commit 4."""
+        raise NotImplementedError(
+            "Okta authorization_server_metadata() not yet implemented (issue #989 commit 4)"
+        )
+
     def get_provider_info(self) -> dict[str, Any]:
         """Get provider-specific information.
 

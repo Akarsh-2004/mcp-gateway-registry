@@ -80,6 +80,7 @@ from registry.health.routes import router as health_router
 from registry.health.service import health_service
 
 # Import registry mode middleware
+from registry.middleware.mcp_www_authenticate import WWWAuthenticateMiddleware
 from registry.middleware.mode_filter import RegistryModeMiddleware
 from registry.repositories.factory import get_search_repository
 from registry.services.agent_service import agent_service
@@ -841,6 +842,34 @@ app = FastAPI(
         },
     ],
 )
+
+# Add WWW-Authenticate middleware for MCP-facing 401s (RFC 9728 §5.1).
+# Must be added BEFORE CORS so the response-mutation step runs LAST in
+# Starlette's LIFO middleware order (i.e. after CORS adds its own headers),
+# preserving the WWW-Authenticate header for the client.
+try:
+    from registry.auth.oauth_metadata import (
+        build_canonical_resource_url,
+        build_resource_metadata_url,
+        enforce_https,
+    )
+
+    _canonical_resource_url = build_canonical_resource_url(settings.registry_url)
+    enforce_https(_canonical_resource_url, https_required=settings.mcp_https_required)
+    _resource_metadata_url = build_resource_metadata_url(_canonical_resource_url)
+    app.add_middleware(
+        WWWAuthenticateMiddleware,
+        resource_metadata_url=_resource_metadata_url,
+    )
+    logger.info(
+        f"Registered WWW-Authenticate middleware for MCP 401s "
+        f"(resource_metadata={_resource_metadata_url})"
+    )
+except ValueError as exc:
+    logger.error(
+        f"Failed to register WWW-Authenticate middleware: {exc}. "
+        "MCP discovery clients will not receive WWW-Authenticate headers on 401s."
+    )
 
 # Add CORS middleware for React development and Docker deployment
 app.add_middleware(

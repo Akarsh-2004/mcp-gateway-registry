@@ -671,6 +671,30 @@ class NginxConfigService:
             root_path = os.environ.get("ROOT_PATH", "").rstrip("/")
             config_content = config_content.replace("{{ROOT_PATH}}", root_path)
 
+            # MCP 2025-06-18 / RFC 9728 §5.1: WWW-Authenticate on auth-failure 401s
+            # must point at the gateway's PRM endpoint. The URL must match the
+            # `resource` field returned by /.well-known/oauth-protected-resource
+            # byte-for-byte.
+            try:
+                from registry.auth.oauth_metadata import (
+                    build_canonical_resource_url,
+                    build_resource_metadata_url,
+                )
+
+                resource_metadata_url = build_resource_metadata_url(
+                    build_canonical_resource_url(settings.registry_url)
+                )
+            except ValueError as exc:
+                logger.warning(
+                    f"Could not derive MCP_RESOURCE_METADATA_URL "
+                    f"(registry_url={settings.registry_url!r}): {exc}. "
+                    "Substituting empty value; clients will not see WWW-Authenticate."
+                )
+                resource_metadata_url = ""
+            config_content = config_content.replace(
+                "{{MCP_RESOURCE_METADATA_URL}}", resource_metadata_url
+            )
+
             return config_content
 
         except Exception as e:
@@ -955,6 +979,11 @@ map "$uri:$http_x_mcp_server_version" $versioned_backend {{
         auth_request_set $auth_method $upstream_http_x_auth_method;
         rewrite_by_lua_file /etc/nginx/lua/capture_body.lua;
         content_by_lua_file /etc/nginx/lua/virtual_router.lua;
+
+        # Route 401s through @auth_error so the WWW-Authenticate header
+        # mandated by RFC 9728 §5.1 is emitted (issue #989).
+        error_page 401 = @auth_error;
+        error_page 403 = @forbidden_error;
     }}"""
                 location_blocks.append(block)
                 logger.debug(f"Generated virtual server location block for {vs.path}")

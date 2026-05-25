@@ -450,10 +450,17 @@ Three policies gate every DCR registration request:
 2. **Trusted Hosts** (`trusted-hosts`) — gates by client IP and/or redirect
    URI host. Configured by `configure_dcr_trusted_hosts()` with
    `host-sending-registration-request-must-match=false`,
-   `client-uris-must-match=true`, `trusted-hosts: ["localhost"]`. So the
-   gateway accepts DCR requests from any IP, but only allows
-   `http://localhost:*/callback` as a redirect URI (which is what every MCP
-   client uses).
+   `client-uris-must-match=true`,
+   `trusted-hosts: ["localhost", "127.0.0.1", "claude.ai"]`. So the gateway
+   accepts DCR requests from any IP, but only allows redirect URIs that
+   resolve to one of those hosts. Three entries cover the realistic clients:
+   - `localhost`: Claude Code (CLI) opens its OAuth listener on
+     `http://localhost:<port>/callback`
+   - `127.0.0.1`: Claude Code variants that send the loopback IP form
+     directly instead of `localhost`
+   - `claude.ai`: Claude.ai's Custom Connector flow runs DCR from
+     Anthropic's cloud and the redirect URI is
+     `https://claude.ai/api/mcp/auth_callback`
 
 3. **Consent Required** — forces every DCR'd client to require user consent
    on first OAuth flow. Default-on; unchanged by us. The "Grant Access to
@@ -634,7 +641,7 @@ Captured here so future hardening passes have a checklist:
 | Auth-server log says `Token validation failed: Token is missing the "aud" claim` | The Keycloak audience mapper isn't attached to the `basic` client-scope. Run `bash keycloak/setup/upgrade-realm-for-dcr.sh` to attach it, then have the user re-authenticate to get a fresh token. Existing tokens issued before the mapper was attached will keep failing until they expire (~5min default). |
 | Auth-server log says `Access denied ... for user scopes: ['profile', 'email', 'offline_access']` | Token has no `groups` claim. Run `bash keycloak/setup/upgrade-realm-for-dcr.sh` to re-attach the groups mapper. Have the user re-authenticate to get a fresh token |
 | DCR returns 403 with `Policy 'Allowed Client Scopes' rejected` | Allowed-scopes policy wasn't widened. Run the upgrade script, OR check the rejected scope name in Keycloak logs |
-| DCR returns 403 with `Policy 'Trusted Hosts' rejected` | Trusted-hosts policy still has the IP check on. Run the upgrade script |
+| DCR returns 403 with `Policy 'Trusted Hosts' rejected` | Either the IP check is still on, or the client's redirect URI host isn't in `trusted-hosts`. Run the upgrade script. The current allowlist is `localhost`, `127.0.0.1`, `claude.ai` — adjust if you're integrating a client whose callback host isn't one of those (e.g. `claude.com`, `cursor.sh`) |
 | Browser shows `temporarily_unavailable: authentication_expired` | User's Keycloak session went stale. Have them log out at `https://<gateway>/realms/mcp-gateway/protocol/openid-connect/logout`, then re-authenticate |
 | Browser shows `localhost:<port> refused to connect` | Claude Code's listener and the browser are on different machines; the OAuth callback to `localhost:<port>` doesn't reach the listener. Either run Claude Code on the same machine as the browser, or open an SSH tunnel `-L <port>:localhost:<port>` between them |
 

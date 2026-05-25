@@ -227,7 +227,7 @@ configure_dcr_trusted_hosts() {
         "config": {
             "host-sending-registration-request-must-match": ["false"],
             "client-uris-must-match": ["true"],
-            "trusted-hosts": ["localhost"]
+            "trusted-hosts": ["localhost", "127.0.0.1", "claude.ai"]
         }
     }'
 

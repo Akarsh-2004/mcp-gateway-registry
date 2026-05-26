@@ -1,6 +1,8 @@
 # MCP Gateway Observability Guide
 
-This guide covers how to access and query metrics collected by the MCP Gateway metrics service.
+This guide covers how to access and query metrics collected by MCP Gateway services.
+
+> **Migration in progress (issue #1122)**: in 1.25.0, registry/auth-server/mcpgw emit metrics natively via the OpenTelemetry SDK. The legacy `metrics-service` HTTP POST path is preserved behind the `METRICS_LEGACY_HTTP_POST=true` flag for one release and removed entirely in 1.26.0. See [Native OTel Emission](#native-otel-emission-1250) below for the new flow.
 
 ## Table of Contents
 
@@ -33,6 +35,48 @@ Auth Server Middleware → Metrics Service API → Dual Path:
 - **`discovery_metrics`**: Tool discovery/search queries
 - **`metrics`**: Raw metrics data (all types)
 - **`api_keys`**: API key management for metrics service
+
+## Native OTel Emission (1.25.0+)
+
+In 1.25.0+ the registry, auth-server, and mcpgw services emit metrics natively via the OpenTelemetry SDK in-process. This replaces (after a one-release transition window) the legacy HTTP POST path to `metrics-service:8890`.
+
+### Why this changed
+
+- **EKS parity**: there was no metrics-service Helm chart, so EKS deployments could never see `auth_request`, `tool_execution`, `tool_discovery`, or any of the in-process counters. They now do.
+- **Per-emission performance**: in-process `Counter.add()` is sub-microsecond vs. ~5-10 ms for the legacy HTTP POST.
+- **Auth surface reduction**: six API keys (`METRICS_API_KEY_REGISTRY`, etc.) are eliminated.
+- **One conceptual model**: every metric rides the same OTLP push that auto-instrumentation already uses; `prometheus_client.REGISTRY` and `MetricsClient.emit_*()` are both retired.
+
+### Operator-facing knobs
+
+| Variable | Default | Purpose |
+|----------|---------|---------|
+| `METRICS_LEGACY_HTTP_POST` | `false` | When `true`, ALSO emit metrics via the legacy HTTP POST path to `metrics-service`. For verification during the 1.25.0 transition window. Removed in 1.26.0. |
+| `OTEL_METRIC_EXPORT_INTERVAL_MS` | `15000` | OTel SDK push interval. Lower for incident-response dashboards; raise for high-traffic production. |
+| `OTEL_EXPORTER_PROMETHEUS_HOST` | `0.0.0.0` (Helm/EKS) / `127.0.0.1` (Compose) | Bind address for the OTel Prometheus exporter. EKS needs `0.0.0.0` because Prometheus runs in a different pod; the chart's NetworkPolicy gates access. |
+| `OTEL_EXPORTER_PROMETHEUS_PORT` | `9464` | Port for the OTel Prometheus exporter. Each service exposes its own. |
+| `OTEL_EXPORTER_OTLP_ENDPOINT` | unset | When set, the OTel SDK pushes metrics via OTLP. On ECS this points at the same-task ADOT sidecar at `http://localhost:4317`. On EKS, point at your in-cluster collector or backend (e.g., `http://otel-collector.monitoring:4317`). |
+
+### Per-deployment-surface flow
+
+**Docker Compose**: Prometheus (already in the stack) scrapes each service's `:9464/metrics` endpoint via Docker network DNS. Add or update `config/prometheus.yml` to include the new scrape jobs (mcp-registry, mcp-auth-server, mcp-mcpgw). After upgrading, restart Prometheus: `docker-compose restart prometheus`.
+
+**AWS ECS**: each service task gets its own per-task ADOT sidecar (`adot-collector` container). The main container OTLP-pushes to `localhost:4317`; the sidecar remote-writes to AMP via sigv4. The metrics-service container and its co-located ADOT remain in place for the dual-write window. The IAM `AMPRemoteWrite` policy is now attached to all three task roles (registry, auth-server, mcpgw) in addition to the metrics-service role.
+
+**Kubernetes (EKS)**: each service exposes its in-process meters at `:9464/metrics`. The Helm chart includes a NetworkPolicy template (`templates/networkpolicy-metrics.yaml`) that gates ingress to that port, defaulting to allow only Prometheus pods in the `monitoring` namespace. Override `metricsScrape.networkPolicy.fromPodSelector` if your in-cluster Prometheus runs elsewhere.
+
+### Verifying the migration is working
+
+The services emit a `metrics_emission_path_total{path}` counter so operators can see at a glance which path is producing metrics.
+
+After upgrading with the default `METRICS_LEGACY_HTTP_POST=false`:
+- `metrics_emission_path_total{path="otel"}` should be incrementing on every request.
+- `metrics_emission_path_total{path="legacy"}` should be zero (or absent) because the legacy code path is gated.
+
+When `METRICS_LEGACY_HTTP_POST=true`:
+- Both `path="otel"` and `path="legacy"` increment in lockstep, confirming the dual-write window.
+
+Each service also emits a single startup log line describing the OTel SDK state, the OTLP endpoint, the export interval, and the legacy-flag state. If the OTLP endpoint is `http://` to a non-localhost host, a WARNING is logged about unencrypted telemetry in transit.
 
 ## Accessing Metrics
 

@@ -505,6 +505,10 @@ Used by `registry` and `mcpgw` services.
 | OTLP headers **(secret)** | `OTEL_EXPORTER_OTLP_HEADERS` | `otel_exporter_otlp_headers` | `registry.app.otelExporterOtlpHeaders` | API-key-bearing. Use Secrets Manager on ECS. |
 | Export interval (ms) | `OTEL_OTLP_EXPORT_INTERVAL_MS` | `otel_otlp_export_interval_ms` | `registry.app.otelOtlpExportIntervalMs` | Default 30000. |
 | Metrics temporality | `OTEL_EXPORTER_OTLP_METRICS_TEMPORALITY_PREFERENCE` | `otel_exporter_otlp_metrics_temporality_preference` | `registry.app.otelExporterOtlpMetricsTemporalityPreference` | `cumulative` (default) or `delta` (Datadog). |
+| Native OTel emission: legacy POST (Issue #1122) | `METRICS_LEGACY_HTTP_POST` | (set in container env block, no top-level tfvar) | `registry.app.metricsLegacyHttpPost`, `auth-server.metrics.legacyHttpPost`, `mcpgw.metrics.legacyHttpPost` | One-release transition flag. `true` keeps the legacy `metrics-service:8890` HTTP POST active alongside native OTel. Default false. Removed in 1.26.0. |
+| Native OTel emission: export interval (Issue #1122) | `OTEL_METRIC_EXPORT_INTERVAL_MS` | (set in container env block) | `registry.app.otelMetricExportIntervalMs`, `auth-server.metrics.otelExportIntervalMs`, `mcpgw.metrics.otelExportIntervalMs` | OTel SDK metric export push interval, ms. Default 15000. |
+| Native OTel emission: Prometheus exporter host (Issue #1122) | `OTEL_EXPORTER_PROMETHEUS_HOST` | (set in container env block) | `registry.app.otelExporterPrometheusHost`, `auth-server.metrics.exporterPrometheusHost`, `mcpgw.metrics.exporterPrometheusHost` | Bind address for the OTel Prometheus exporter listener. EKS default `0.0.0.0` (NetworkPolicy gates access); Compose default `127.0.0.1`. |
+| Native OTel emission: Prometheus exporter port (Issue #1122) | `OTEL_EXPORTER_PROMETHEUS_PORT` | (set in container env block) | `registry.app.otelExporterPrometheusPort`, `auth-server.metrics.exporterPrometheusPort`, `mcpgw.metrics.exporterPrometheusPort` | Port for the OTel Prometheus exporter. Default 9464. |
 
 ---
 

@@ -301,6 +301,64 @@ The bootstrap helpers will detect the unset state and leave the SDK in
 NoOp mode. Every `Counter.add()` and `Histogram.record()` call across the
 codebase becomes a zero-cost no-op.
 
+## Adding a graphical trace UI
+
+The default `docker-compose.yml` ships an `otel-collector` container that
+receives traces from registry/auth-server/mcpgw and logs them to stdout
+via the debug exporter (good for verification, awkward for browsing). If
+you want a visual trace browser locally, drop in a Jaeger or Tempo
+container and route the collector's traces pipeline to it. The eight
+lines below give you Jaeger at `http://localhost:16686/`.
+
+**Step 1**: add a `jaeger` service to your `docker-compose.yml`
+(e.g., before the `prometheus` service):
+
+```yaml
+  jaeger:
+    image: jaegertracing/all-in-one:latest
+    environment:
+      - COLLECTOR_OTLP_ENABLED=true
+    ports:
+      - "16686:16686" # Jaeger UI
+    restart: unless-stopped
+```
+
+**Step 2**: in `config/otel/collector.yaml`, add a Jaeger exporter and
+include it in the traces pipeline:
+
+```yaml
+exporters:
+  # ... existing exporters ...
+  otlp/jaeger:
+    endpoint: jaeger:4317
+    tls:
+      insecure: true
+
+service:
+  pipelines:
+    traces:
+      receivers: [otlp]
+      exporters: [debug, otlp/jaeger]   # add otlp/jaeger here
+```
+
+**Step 3**: bring it up:
+
+```
+docker compose up -d jaeger
+docker compose restart otel-collector
+```
+
+Open `http://localhost:16686/`, pick a service from the dropdown
+(`mcp-gateway-registry`, `mcp-auth-server`, `mcp-mcpgw`), click
+**Find Traces**. Each trace shows the full waterfall: HTTP span at the
+top, child spans for downstream calls (MongoDB queries, httpx requests
+to the registry, FastMCP tool dispatch, etc.).
+
+The same pattern works with Tempo, Zipkin, or any OTLP-receiving
+backend — swap the exporter type. We don't ship Jaeger by default to
+keep the Compose footprint minimal and to avoid pulling an extra image
+in restricted environments.
+
 ## Related docs
 
 - [docs/metrics-architecture.md](metrics-architecture.md) — design-level

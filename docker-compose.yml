@@ -616,10 +616,14 @@ services:
 
   # OpenTelemetry Collector (Issue #1122)
   # Receives OTLP from registry/auth-server/mcpgw on :4317, re-exports as
-  # Prometheus on :8889, and forwards traces to Jaeger for the UI.
+  # Prometheus on :8889, and logs everything via the debug exporter.
   # Used for local verification; the OTLP push pipeline is also exercised
   # on ECS via per-task ADOT sidecars and on EKS via the operator's own
   # collector.
+  #
+  # For a graphical trace UI (Jaeger, Tempo, etc.), see the "Adding a
+  # graphical trace UI" section of docs/OBSERVABILITY.md for the small
+  # config additions you can drop in.
   otel-collector:
     image: otel/opentelemetry-collector-contrib:latest
     command: ["--config=/etc/otelcol-contrib/config.yaml"]
@@ -630,19 +634,6 @@ services:
       - "4318:4318"   # OTLP HTTP
       - "8889:8889"   # Prometheus exporter on the collector itself
       - "13133:13133" # health_check extension
-    depends_on:
-      - jaeger
-    restart: unless-stopped
-
-  # Jaeger UI (Issue #1122). Receives traces from the otel-collector and
-  # provides a graphical UI for browsing them at http://localhost:16686.
-  # Use the all-in-one image which bundles collector + query + UI.
-  jaeger:
-    image: jaegertracing/all-in-one:latest
-    environment:
-      - COLLECTOR_OTLP_ENABLED=true
-    ports:
-      - "16686:16686" # Jaeger UI
     restart: unless-stopped
 
   # Prometheus for metrics collection

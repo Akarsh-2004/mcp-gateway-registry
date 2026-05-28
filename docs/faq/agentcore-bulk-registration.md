@@ -155,15 +155,54 @@ The scanner writes the client IDs into `token_refresh_manifest.json`. After runn
 cat token_refresh_manifest.json | python3 -m json.tool
 ```
 
-Each entry contains:
+Example output (multiple gateways, all using Cognito):
+
 ```json
-{
-  "server_path": "/geo-mcp",
-  "discovery_url": "https://cognito-idp.us-east-1.amazonaws.com/us-east-1_XXXXX/.well-known/openid-configuration",
-  "allowed_clients": ["49ujl0b9ser72gnp6q1ph9v6vs"],
-  "idp_vendor": "cognito"
-}
+[
+    {
+        "server_path": "/customersupport-gw",
+        "gateway_arn": "arn:aws:bedrock-agentcore:us-east-1:123456789012:gateway/customersupport-gw-abc123def",
+        "discovery_url": "https://cognito-idp.us-east-1.amazonaws.com/us-east-1_AbCdEfGhI/.well-known/openid-configuration",
+        "allowed_clients": [
+            "7abc2def47ghijklmnop12qrs3"
+        ],
+        "allowed_audience": [],
+        "idp_vendor": "cognito"
+    },
+    {
+        "server_path": "/geo-mcp",
+        "gateway_arn": "arn:aws:bedrock-agentcore:us-east-1:123456789012:gateway/geo-mcp-xyz789uvw",
+        "discovery_url": "https://cognito-idp.us-east-1.amazonaws.com/us-east-1_JkLmNoPqR/.well-known/openid-configuration",
+        "allowed_clients": [
+            "5tuv3wxy9zabcde1fghij2klmn"
+        ],
+        "allowed_audience": [],
+        "idp_vendor": "cognito"
+    },
+    {
+        "server_path": "/sre-gateway",
+        "gateway_arn": "arn:aws:bedrock-agentcore:us-east-1:123456789012:gateway/sre-gateway-qrs456tuv",
+        "discovery_url": "https://cognito-idp.us-west-2.amazonaws.com/us-west-2_StUvWxYzA/.well-known/openid-configuration",
+        "allowed_clients": [
+            "2opqr4stu6vwxyz8abcde0fghi"
+        ],
+        "allowed_audience": [],
+        "idp_vendor": "cognito"
+    },
+    {
+        "server_path": "/weather-time-observability-gateway",
+        "gateway_arn": "arn:aws:bedrock-agentcore:us-east-1:123456789012:gateway/weather-time-observability-gateway-lmn012opq",
+        "discovery_url": "https://cognito-idp.us-east-1.amazonaws.com/us-east-1_BcDeFgHiJ/.well-known/openid-configuration",
+        "allowed_clients": [
+            "49abc0def9ghijklmnop6qrstu"
+        ],
+        "allowed_audience": [],
+        "idp_vendor": "cognito"
+    }
+]
 ```
+
+Each `allowed_clients` entry is an alphanumeric Cognito App Client ID (typically 26 characters). This is the identifier you reference when configuring secrets.
 
 ### Configure Secrets
 

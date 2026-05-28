@@ -296,9 +296,44 @@ uv run python -m cli.agentcore.token_refresher \
     --loop --interval 2700
 ```
 
-After the token refresher runs, the gateways will show as "Healthy" in the registry UI.
+After the token refresher runs, the gateways will have valid egress tokens. However, they are still **disabled** by default.
 
-## Step 5: Verify Registration
+## Step 5: Enable the Registered Servers and Agents
+
+Newly registered assets start in a disabled state. You need to enable each one before it appears in search results and health checks begin:
+
+```bash
+# Enable each server (toggle switches from disabled to enabled)
+uv run python api/registry_management.py \
+    --registry-url http://localhost \
+    --token-file .token \
+    toggle --path /customersupport-gw
+
+uv run python api/registry_management.py \
+    --registry-url http://localhost \
+    --token-file .token \
+    toggle --path /geo-mcp
+
+uv run python api/registry_management.py \
+    --registry-url http://localhost \
+    --token-file .token \
+    toggle --path /sre-gateway
+```
+
+For agents, use `agent-toggle`:
+
+```bash
+uv run python api/registry_management.py \
+    --registry-url http://localhost \
+    --token-file .token \
+    agent-toggle --path /my-simple-agent
+```
+
+You can also enable them from the registry UI by clicking the toggle switch on each asset's card.
+
+Once enabled, the registry begins health-checking the assets. After a few seconds they should transition to "Healthy" (assuming the token refresher has already run for CUSTOM_JWT gateways).
+
+## Step 6: Verify Registration
 
 Check that the servers and agents are registered and healthy:
 

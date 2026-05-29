@@ -1138,14 +1138,20 @@ def cmd_server_get(args: argparse.Namespace) -> int:
             "is_enabled": server.is_enabled,
             "health_status": server.health_status,
             "transport": server.transport,
+            "supported_transports": getattr(server, "supported_transports", None),
             "version": server.version,
             "versions": server.versions,
             "license": server.license,
-            # Local-server fields. ServerDetailResponse uses extra='allow', so
-            # these surface via the extra-attrs lookup even though they aren't
-            # declared as model fields.
             "deployment": getattr(server, "deployment", None) or "remote",
             "local_runtime": getattr(server, "local_runtime", None),
+            "metadata": getattr(server, "metadata", None),
+            "visibility": getattr(server, "visibility", None),
+            "allowed_groups": getattr(server, "allowed_groups", None),
+            "auth_scheme": getattr(server, "auth_scheme", None),
+            "mcp_endpoint": getattr(server, "mcp_endpoint", None),
+            "sse_endpoint": getattr(server, "sse_endpoint", None),
+            "status": getattr(server, "status", None),
+            "registered_by": getattr(server, "registered_by", None),
         }
         print(json.dumps(output, indent=2, default=str))
         return 0

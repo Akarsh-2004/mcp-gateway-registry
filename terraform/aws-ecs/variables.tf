@@ -1211,6 +1211,11 @@ variable "mcp_cloud_provider" {
   description = "Override the cloud auto-detection cascade (issue #1120). Allowed: aws, azure, gcp, on_premises, other. Leave empty to let the cascade run. When set, telemetry reports cloud_detection_method=explicit."
   type        = string
   default     = ""
+
+  validation {
+    condition     = var.mcp_cloud_provider == "" || contains(["aws", "azure", "gcp", "on_premises", "other"], var.mcp_cloud_provider)
+    error_message = "mcp_cloud_provider must be one of: aws, azure, gcp, on_premises, other (or empty for auto-detection)."
+  }
 }
 
 variable "disable_ai_registry_tools_server" {

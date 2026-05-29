@@ -53,7 +53,7 @@ export const CloudProviderBanner: React.FC = () => {
         Are you running this on-premises, or somewhere else?
       </p>
       <p className="text-xs text-gray-600 mt-1">
-        If you're actually on AWS, Azure, or GCP, please upgrade to 1.24.2+&nbsp;&mdash; we likely have a detection bug for your setup.
+        If you're actually on AWS, Azure, or GCP, please upgrade to 1.24.2+ (we likely have a detection bug for your setup).
       </p>
       <div className="flex gap-3 mt-3 items-center">
         <button
@@ -78,11 +78,6 @@ export const CloudProviderBanner: React.FC = () => {
           Don't show this again
         </button>
       </div>
-      {!shouldShow && (
-        <span className="sr-only" aria-live="polite">
-          Banner dismissed.
-        </span>
-      )}
     </div>
   );
 };

@@ -746,6 +746,53 @@ async def get_banner_state(
 
 
 @router.post("/cloud-provider-hint", status_code=204)
+async def _audit_cloud_hint_set(
+    request: Request,
+    user_context: dict,
+    hint: str,
+) -> None:
+    """Emit an audit log entry for a cloud-provider hint write."""
+    import uuid as _uuid
+
+    from ..audit.models import (
+        Action,
+        Identity,
+        RegistryApiAccessRecord,
+    )
+    from ..audit.models import Request as AuditRequest
+    from ..audit.models import Response as AuditResponse
+
+    audit_logger = getattr(request.app.state, "audit_logger", None)
+    if not audit_logger:
+        return
+    try:
+        client_ip = request.client.host if request.client else "unknown"
+        record = RegistryApiAccessRecord(
+            timestamp=datetime.now(UTC),
+            request_id=str(_uuid.uuid4()),
+            identity=Identity(
+                username=user_context.get("username", "unknown"),
+                auth_method=user_context.get("auth_method", "unknown"),
+                is_admin=True,
+                credential_type="session_cookie",
+            ),
+            request=AuditRequest(
+                method="POST",
+                path="/api/registry/cloud-provider-hint",
+                client_ip=client_ip,
+            ),
+            response=AuditResponse(status_code=204, duration_ms=0),
+            action=Action(
+                operation="write",
+                resource_type="registry_card",
+                description=f"Set cloud_provider_hint to {hint!r}",
+            ),
+        )
+        await audit_logger.log_event(record)
+    except Exception as e:
+        logger.warning(f"[banner] audit log for hint set failed: {type(e).__name__}")
+
+
 async def set_cloud_provider_hint(
     payload: CloudProviderHintRequest,
     request: Request,
@@ -765,7 +812,7 @@ async def set_cloud_provider_hint(
     if card.cloud_provider_hint:
         raise HTTPException(
             status_code=409,
-            detail=f"hint is already set to {card.cloud_provider_hint!r}",
+            detail="Cloud provider hint is already set",
         )
 
     card.cloud_provider_hint = payload.hint
@@ -780,40 +827,4 @@ async def set_cloud_provider_hint(
         f"(registry_id={str(card.id)[:8]})"
     )
 
-    audit_logger = getattr(request.app.state, "audit_logger", None)
-    if audit_logger:
-        try:
-            import uuid as _uuid
-            from ..audit.models import (
-                Action,
-                Identity,
-                RegistryApiAccessRecord,
-            )
-            from ..audit.models import Request as AuditRequest
-            from ..audit.models import Response as AuditResponse
-
-            client_ip = request.client.host if request.client else "unknown"
-            record = RegistryApiAccessRecord(
-                timestamp=datetime.now(UTC),
-                request_id=str(_uuid.uuid4()),
-                identity=Identity(
-                    username=user_context.get("username", "unknown"),
-                    auth_method=user_context.get("auth_method", "unknown"),
-                    is_admin=True,
-                    credential_type="session_cookie",
-                ),
-                request=AuditRequest(
-                    method="POST",
-                    path="/api/registry/cloud-provider-hint",
-                    client_ip=client_ip,
-                ),
-                response=AuditResponse(status_code=204, duration_ms=0),
-                action=Action(
-                    operation="write",
-                    resource_type="registry_card",
-                    description=f"Set cloud_provider_hint to {payload.hint!r}",
-                ),
-            )
-            await audit_logger.log_event(record)
-        except Exception as e:
-            logger.warning(f"[banner] audit log for hint set failed: {type(e).__name__}")
+    await _audit_cloud_hint_set(request, user_context, payload.hint)

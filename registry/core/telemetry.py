@@ -18,6 +18,7 @@ import logging
 import os
 import platform
 import sys
+import time
 import uuid
 from datetime import UTC, datetime, timedelta
 
@@ -288,8 +289,6 @@ async def _get_operator_cloud_hint() -> str | None:
     Returns one of 'on_premises', 'other', 'declined', or None.
     Never raises — on any repository error returns None so the cascade proceeds.
     """
-    import time
-
     now = time.monotonic()
     cached = _hint_cache.get("registry")
     if cached is not None and now - cached[0] < _HINT_CACHE_TTL_SECONDS:

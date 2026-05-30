@@ -1406,7 +1406,10 @@ async def get_agent_batch_job(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="You can only view batch jobs you submitted",
         )
-    return job.model_dump(mode="json")
+    return job.model_dump(
+        mode="json",
+        exclude={"submitter_ui_permissions", "submitter_is_admin", "submitted_body_hash"},
+    )
 
 
 @router.get("/agents/{path:path}")

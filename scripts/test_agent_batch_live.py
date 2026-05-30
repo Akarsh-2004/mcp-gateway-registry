@@ -30,6 +30,7 @@ import sys
 import time
 import uuid
 from dataclasses import dataclass, field
+from typing import Any
 
 import requests
 
@@ -39,11 +40,13 @@ logging.basicConfig(
 )
 logger = logging.getLogger("agent-batch-live")
 
-DEFAULT_BASE_URL: str = "http://localhost"  # Through nginx (port 80), not direct :7860
-DEFAULT_TOKEN_FILE: str = ".oauth-tokens/ingress.json"
+DEFAULT_BASE_URL: str = "http://localhost"
+DEFAULT_TOKEN_FILE: str = ".token"
 API_BASE: str = "/api/agents"
 REQUEST_TIMEOUT: int = 30
 TERMINAL_STATES: frozenset[str] = frozenset({"succeeded", "partial", "failed"})
+MODE_REQUESTS: str = "requests"
+MODE_CLIENT: str = "client"
 
 
 @dataclass
@@ -54,10 +57,22 @@ class CheckResult:
 
 
 @dataclass
+class JobTiming:
+    """Timing record for a completed batch job."""
+
+    flow: str
+    job_id: str
+    items: int
+    duration_s: float
+    state: str
+
+
+@dataclass
 class Summary:
     base_url: str
     checks: list[CheckResult] = field(default_factory=list)
     created_paths: list[str] = field(default_factory=list)
+    job_timings: list[JobTiming] = field(default_factory=list)
 
     def add(self, name: str, passed: bool, detail: str = "") -> bool:
         self.checks.append(CheckResult(name=name, passed=passed, detail=detail))
@@ -65,17 +80,78 @@ class Summary:
         logger.info(f"[{marker}] {name}{f' — {detail}' if detail else ''}")
         return passed
 
+    def record_job(
+        self,
+        flow: str,
+        job_id: str,
+        items: int,
+        duration_s: float,
+        state: str,
+    ) -> None:
+        self.job_timings.append(
+            JobTiming(flow=flow, job_id=job_id, items=items, duration_s=duration_s, state=state)
+        )
+
+    def print_timing_report(self) -> None:
+        if not self.job_timings:
+            return
+        logger.info("")
+        logger.info("=" * 72)
+        logger.info("BATCH JOB TIMING REPORT")
+        logger.info("=" * 72)
+        logger.info(f"{'Flow':<30} {'Job ID':<12} {'Items':>5} {'Time (s)':>9} {'State':<10}")
+        logger.info("-" * 72)
+        total_items = 0
+        total_time = 0.0
+        for t in self.job_timings:
+            logger.info(
+                f"{t.flow:<30} {t.job_id[:10]:<12} {t.items:>5} {t.duration_s:>9.2f} {t.state:<10}"
+            )
+            total_items += t.items
+            total_time += t.duration_s
+        logger.info("-" * 72)
+        logger.info(
+            f"{'TOTAL':<30} {'':<12} {total_items:>5} {total_time:>9.2f}"
+        )
+        if total_items > 0 and total_time > 0:
+            logger.info(f"Throughput: {total_items / total_time:.1f} items/sec (wall clock)")
+        logger.info("=" * 72)
+
 
 def _load_token(token_file: str) -> str:
-    """Load a JWT Bearer token from a credentials JSON file."""
+    """Load a JWT Bearer token from a file.
+
+    Supports three formats:
+    - Raw JWT string (no JSON, just the token text)
+    - Flat JSON: {"access_token": "..."} or {"token": "..."}
+    - Nested JSON: {"tokens": {"access_token": "..."}}
+    """
     abs_path = os.path.abspath(token_file)
     with open(abs_path) as f:
-        data = json.load(f)
+        content = f.read().strip()
+
+    # Try raw JWT (starts with eyJ)
+    if content.startswith("eyJ"):
+        logger.info(f"Token loaded from {abs_path} (raw JWT, length {len(content)})")
+        return content
+
+    # Try JSON formats
+    data = json.loads(content)
+
+    # Nested: {"tokens": {"access_token": "..."}}
+    if isinstance(data.get("tokens"), dict):
+        token = data["tokens"].get("access_token") or data["tokens"].get("token")
+        if token:
+            logger.info(f"Token loaded from {abs_path} (nested JSON, length {len(token)})")
+            return token
+
+    # Flat: {"access_token": "..."} or {"token": "..."}
     token = data.get("access_token") or data.get("token")
-    if not token:
-        raise ValueError(f"No access_token/token found in {abs_path}")
-    logger.info(f"Token loaded from {abs_path} (length {len(token)})")
-    return token
+    if token:
+        logger.info(f"Token loaded from {abs_path} (flat JSON, length {len(token)})")
+        return token
+
+    raise ValueError(f"No access_token/token found in {abs_path}")
 
 
 def _resolve_token(
@@ -119,6 +195,70 @@ def _request(
         except ValueError:
             logger.warning(f"   body: {response.text[:500]}")
     return response
+
+
+class _ClientTransport:
+    """Transport adapter that uses api/registry_client.py instead of raw requests.
+
+    Provides the same submit/poll/delete interface as the requests-based path
+    but exercises the RegistryClient SDK layer that CLI users call.
+    """
+
+    def __init__(self, base_url: str, token: str):
+        sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."))
+        from api.registry_client import RegistryClient
+
+        self._client = RegistryClient(registry_url=base_url, token=token)
+        self._base_url = base_url
+        self._token = token
+
+    def submit_batch(
+        self,
+        items: list[dict[str, Any]],
+        idempotency_key: str | None = None,
+    ) -> tuple[int, dict]:
+        """Submit a batch job via the client. Returns (status_code, response_dict)."""
+        try:
+            resp = self._client.submit_agent_batch(items, idempotency_key=idempotency_key)
+            return 202, {
+                "job_id": resp.job_id,
+                "status_url": resp.status_url,
+            }
+        except Exception as e:
+            status = getattr(getattr(e, "response", None), "status_code", 500)
+            return status, {"error": str(e)}
+
+    def get_batch_status(self, job_id: str) -> tuple[int, dict]:
+        """Poll a batch job via the client. Returns (status_code, job_dict)."""
+        try:
+            job = self._client.get_agent_batch(job_id)
+            return 200, job.model_dump()
+        except Exception as e:
+            status = getattr(getattr(e, "response", None), "status_code", 500)
+            return status, {"error": str(e)}
+
+    def register_agent(self, payload: dict) -> tuple[int, dict]:
+        """Register an agent via raw POST (client doesn't have a typed method for this)."""
+        resp = requests.post(
+            f"{self._base_url}{API_BASE}/register",
+            json=payload,
+            headers={
+                "Authorization": f"Bearer {self._token}",
+                "Content-Type": "application/json",
+            },
+            timeout=REQUEST_TIMEOUT,
+        )
+        body = resp.json() if resp.content else {}
+        return resp.status_code, body
+
+    def delete_agent(self, path: str) -> int:
+        """Delete an agent. Returns status code."""
+        resp = requests.delete(
+            f"{self._base_url}{API_BASE}{path}",
+            headers={"Authorization": f"Bearer {self._token}"},
+            timeout=REQUEST_TIMEOUT,
+        )
+        return resp.status_code
 
 
 def _register_payload(
@@ -227,6 +367,31 @@ def _poll_batch_job(
     return None
 
 
+def _poll_batch_job_client(
+    transport: _ClientTransport,
+    job_id: str,
+    timeout_s: float,
+    interval_s: float,
+) -> dict | None:
+    """Poll a batch job via the registry_client transport."""
+    deadline = time.time() + timeout_s
+    while time.time() < deadline:
+        status_code, job = transport.get_batch_status(job_id)
+        if status_code != 200:
+            logger.warning(f"   client poll returned status {status_code}")
+            return None
+        state = job.get("state")
+        logger.info(
+            f"   job {job.get('job_id')} state={state} "
+            f"succeeded={job.get('succeeded')} failed={job.get('failed')}/{job.get('total')}"
+        )
+        if state in TERMINAL_STATES:
+            return job
+        time.sleep(interval_s)
+    logger.error("   batch job did not reach a terminal state before timeout")
+    return None
+
+
 def _run_batch_flow(
     session: requests.Session,
     base_url: str,
@@ -323,6 +488,288 @@ def _run_batch_flow(
     )
 
 
+def _run_bulk_batch_flow(
+    session: requests.Session,
+    base_url: str,
+    summary: Summary,
+    poll_timeout_s: float,
+    poll_interval_s: float,
+    count: int = 100,
+) -> None:
+    """Register `count` agents in one batch, then patch half and delete half."""
+    run_id = uuid.uuid4().hex[:8]
+    logger.info(f"Bulk batch flow: registering {count} agents (run_id={run_id})")
+
+    paths = [f"/bulk-{run_id}-{i:04d}" for i in range(count)]
+    register_items = [
+        {
+            "op": "register",
+            "card": _register_payload(
+                f"Bulk Agent {run_id}/{i:04d}",
+                paths[i],
+                f"Bulk-registered agent {i} of {count}",
+            ),
+        }
+        for i in range(count)
+    ]
+
+    batch_body = {
+        "idempotency_key": f"bulk-register-{run_id}",
+        "items": register_items,
+    }
+
+    start = time.time()
+    submit = _request(session, "POST", f"{base_url}{API_BASE}/batch", json_body=batch_body)
+    if not summary.add(
+        f"Bulk register: submit {count} items accepted (202)",
+        submit.status_code == 202,
+        f"HTTP {submit.status_code}",
+    ):
+        return
+
+    payload = submit.json()
+    status_url = f"{base_url}{payload['status_url']}"
+    job_id = payload["job_id"]
+    summary.created_paths.extend(paths)
+
+    job = _poll_batch_job(session, status_url, poll_timeout_s, poll_interval_s)
+    duration = time.time() - start
+    if not summary.add("Bulk register: job reached terminal state", job is not None):
+        return
+
+    summary.add(
+        f"Bulk register: all {count} succeeded",
+        job.get("state") == "succeeded" and job.get("succeeded") == count,
+        f"state={job.get('state')} succeeded={job.get('succeeded')}/{job.get('total')}",
+    )
+    summary.record_job("bulk-register", job_id, count, duration, job.get("state", "?"))
+
+    half = count // 2
+    logger.info(f"Bulk batch flow: patching {half} agents, deleting {half} agents")
+
+    mutate_items = []
+    for i in range(half):
+        mutate_items.append({
+            "op": "patch",
+            "path": paths[i],
+            "card": {"description": f"Bulk-patched at index {i}"},
+        })
+    for i in range(half, count):
+        mutate_items.append({
+            "op": "delete",
+            "path": paths[i],
+        })
+
+    mutate_body = {
+        "idempotency_key": f"bulk-mutate-{run_id}",
+        "items": mutate_items,
+    }
+
+    start2 = time.time()
+    submit2 = _request(session, "POST", f"{base_url}{API_BASE}/batch", json_body=mutate_body)
+    if not summary.add(
+        f"Bulk mutate: submit {count} items accepted (202)",
+        submit2.status_code == 202,
+        f"HTTP {submit2.status_code}",
+    ):
+        return
+
+    payload2 = submit2.json()
+    status_url2 = f"{base_url}{payload2['status_url']}"
+    job_id2 = payload2["job_id"]
+
+    job2 = _poll_batch_job(session, status_url2, poll_timeout_s, poll_interval_s)
+    duration2 = time.time() - start2
+    if not summary.add("Bulk mutate: job reached terminal state", job2 is not None):
+        return
+
+    summary.add(
+        f"Bulk mutate: all {count} items succeeded",
+        job2.get("state") == "succeeded" and job2.get("succeeded") == count,
+        f"state={job2.get('state')} succeeded={job2.get('succeeded')}/{job2.get('total')}",
+    )
+    summary.record_job("bulk-mutate", job_id2, count, duration2, job2.get("state", "?"))
+
+    failed_items = [r for r in job2.get("results", []) if r.get("status", 0) >= 400]
+    if failed_items:
+        for r in failed_items[:5]:
+            logger.warning(
+                f"   failed item: op={r.get('op')} path={r.get('path')} "
+                f"status={r.get('status')} error={r.get('error')}"
+            )
+
+    # Remove deleted paths from cleanup list (they're already gone)
+    deleted_paths = set(paths[half:])
+    summary.created_paths = [p for p in summary.created_paths if p not in deleted_paths]
+
+
+def _run_parallel_batch_flow(
+    session: requests.Session,
+    base_url: str,
+    summary: Summary,
+    poll_timeout_s: float,
+    poll_interval_s: float,
+    num_jobs: int = 3,
+    agents_per_job: int = 20,
+) -> None:
+    """Submit multiple batch jobs concurrently and track each to completion."""
+    run_id = uuid.uuid4().hex[:8]
+    logger.info(
+        f"Parallel batch flow: submitting {num_jobs} jobs x {agents_per_job} agents "
+        f"(run_id={run_id})"
+    )
+
+    job_ids = []
+    all_paths = []
+    submit_start = time.time()
+
+    for job_num in range(num_jobs):
+        paths = [f"/parallel-{run_id}-j{job_num}-{i:03d}" for i in range(agents_per_job)]
+        all_paths.extend(paths)
+        items = [
+            {
+                "op": "register",
+                "card": _register_payload(
+                    f"Parallel {run_id}/j{job_num}/{i:03d}",
+                    paths[i],
+                    f"Parallel job {job_num} agent {i}",
+                ),
+            }
+            for i in range(agents_per_job)
+        ]
+        batch_body = {
+            "idempotency_key": f"parallel-{run_id}-j{job_num}",
+            "items": items,
+        }
+
+        submit = _request(session, "POST", f"{base_url}{API_BASE}/batch", json_body=batch_body)
+        if not summary.add(
+            f"Parallel: job {job_num} submit accepted (202)",
+            submit.status_code == 202,
+            f"HTTP {submit.status_code}",
+        ):
+            continue
+        payload = submit.json()
+        job_ids.append((job_num, payload["job_id"], f"{base_url}{payload['status_url']}"))
+
+    summary.created_paths.extend(all_paths)
+
+    if not job_ids:
+        return
+
+    logger.info(f"Parallel batch flow: tracking {len(job_ids)} jobs to completion")
+
+    for job_num, job_id, status_url in job_ids:
+        job = _poll_batch_job(session, status_url, poll_timeout_s, poll_interval_s)
+        duration = time.time() - submit_start
+        if not summary.add(
+            f"Parallel: job {job_num} ({job_id[:8]}) reached terminal state",
+            job is not None,
+        ):
+            continue
+        summary.add(
+            f"Parallel: job {job_num} all {agents_per_job} succeeded",
+            job.get("state") == "succeeded" and job.get("succeeded") == agents_per_job,
+            f"state={job.get('state')} succeeded={job.get('succeeded')}/{job.get('total')}",
+        )
+        summary.record_job(
+            f"parallel-j{job_num}", job_id, agents_per_job, duration, job.get("state", "?")
+        )
+
+
+def _run_client_mode_flows(
+    transport: _ClientTransport,
+    summary: Summary,
+    poll_timeout_s: float,
+    poll_interval_s: float,
+) -> None:
+    """Run the batch flows using the registry_client transport layer."""
+    run_id = uuid.uuid4().hex[:8]
+    logger.info(f"CLIENT MODE: Running batch flows via registry_client (run_id={run_id})")
+
+    count = 100
+    paths = [f"/client-bulk-{run_id}-{i:04d}" for i in range(count)]
+    register_items = [
+        {
+            "op": "register",
+            "card": _register_payload(
+                f"Client Bulk {run_id}/{i:04d}",
+                paths[i],
+                f"Client-mode bulk agent {i}",
+            ),
+        }
+        for i in range(count)
+    ]
+
+    start = time.time()
+    status_code, resp = transport.submit_batch(
+        register_items, idempotency_key=f"client-bulk-{run_id}"
+    )
+    if not summary.add(
+        f"Client: bulk register {count} submit accepted",
+        status_code == 202,
+        f"HTTP {status_code}",
+    ):
+        return
+    summary.created_paths.extend(paths)
+
+    job_id = resp["job_id"]
+    job = _poll_batch_job_client(transport, job_id, poll_timeout_s, poll_interval_s)
+    duration = time.time() - start
+    if not summary.add("Client: bulk register job completed", job is not None):
+        return
+    summary.add(
+        f"Client: bulk register all {count} succeeded",
+        job.get("state") == "succeeded" and job.get("succeeded") == count,
+        f"state={job.get('state')} succeeded={job.get('succeeded')}/{job.get('total')}",
+    )
+    summary.record_job("client-bulk-register", job_id, count, duration, job.get("state", "?"))
+
+    # Submit 3 parallel jobs via client
+    num_jobs = 3
+    per_job = 20
+    logger.info(f"CLIENT MODE: submitting {num_jobs} parallel jobs x {per_job} agents")
+    job_starts: list[tuple[int, str, float]] = []
+
+    for j in range(num_jobs):
+        j_paths = [f"/client-par-{run_id}-j{j}-{i:03d}" for i in range(per_job)]
+        summary.created_paths.extend(j_paths)
+        items = [
+            {
+                "op": "register",
+                "card": _register_payload(
+                    f"Client Par {run_id}/j{j}/{i:03d}",
+                    j_paths[i],
+                    f"Client parallel job {j} agent {i}",
+                ),
+            }
+            for i in range(per_job)
+        ]
+        j_start = time.time()
+        sc, r = transport.submit_batch(items, idempotency_key=f"client-par-{run_id}-j{j}")
+        if not summary.add(
+            f"Client parallel: job {j} submit accepted",
+            sc == 202,
+            f"HTTP {sc}",
+        ):
+            continue
+        job_starts.append((j, r["job_id"], j_start))
+
+    for j, jid, j_start in job_starts:
+        job = _poll_batch_job_client(transport, jid, poll_timeout_s, poll_interval_s)
+        j_duration = time.time() - j_start
+        if not summary.add(f"Client parallel: job {j} completed", job is not None):
+            continue
+        summary.add(
+            f"Client parallel: job {j} all {per_job} succeeded",
+            job.get("state") == "succeeded" and job.get("succeeded") == per_job,
+            f"state={job.get('state')} succeeded={job.get('succeeded')}/{job.get('total')}",
+        )
+        summary.record_job(
+            f"client-parallel-j{j}", jid, per_job, j_duration, job.get("state", "?")
+        )
+
+
 def _cleanup(
     session: requests.Session,
     base_url: str,
@@ -375,6 +822,15 @@ def _build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Do not delete agents created during the run",
     )
+    parser.add_argument(
+        "--mode",
+        choices=[MODE_REQUESTS, MODE_CLIENT, "both"],
+        default=MODE_REQUESTS,
+        help=(
+            "Transport mode: 'requests' uses raw HTTP (default), "
+            "'client' uses api/registry_client.py, 'both' runs both in sequence"
+        ),
+    )
     return parser
 
 
@@ -393,8 +849,31 @@ def main() -> int:
 
     summary = Summary(base_url=base_url)
     try:
-        _run_put_flow(session, base_url, summary)
-        _run_batch_flow(session, base_url, summary, args.poll_timeout, args.poll_interval)
+        run_requests = args.mode in (MODE_REQUESTS, "both")
+        run_client = args.mode in (MODE_CLIENT, "both")
+
+        if run_requests:
+            logger.info("=" * 60)
+            logger.info("REQUESTS MODE (raw HTTP)")
+            logger.info("=" * 60)
+            _run_put_flow(session, base_url, summary)
+            _run_batch_flow(session, base_url, summary, args.poll_timeout, args.poll_interval)
+            _run_bulk_batch_flow(
+                session, base_url, summary, args.poll_timeout, args.poll_interval, count=100
+            )
+            _run_parallel_batch_flow(
+                session, base_url, summary, args.poll_timeout, args.poll_interval,
+                num_jobs=3, agents_per_job=20,
+            )
+
+        if run_client:
+            logger.info("=" * 60)
+            logger.info("CLIENT MODE (api/registry_client.py)")
+            logger.info("=" * 60)
+            transport = _ClientTransport(base_url, token)
+            _run_client_mode_flows(
+                transport, summary, args.poll_timeout, args.poll_interval
+            )
     finally:
         if args.keep:
             logger.info(f"--keep set; leaving {len(summary.created_paths)} agent(s) in place")
@@ -404,10 +883,13 @@ def main() -> int:
 
     passed = sum(1 for c in summary.checks if c.passed)
     total = len(summary.checks)
+    logger.info("")
     logger.info(f"Summary: {passed}/{total} checks passed against {base_url}")
     for check in summary.checks:
         marker = "PASS" if check.passed else "FAIL"
         logger.info(f"  [{marker}] {check.name}")
+
+    summary.print_timing_report()
 
     return 0 if passed == total else 1
 

@@ -195,6 +195,8 @@ Async batch register/patch/replace/delete for agent cards, drained by an in-proc
 | Job retention (days) | `BATCH_JOB_RETENTION_DAYS` | `batch_job_retention_days` | `registry.app.batchJobRetentionDays` | TTL on `updated_at`. Default 7. |
 | Worker poll interval | `BATCH_WORKER_POLL_INTERVAL_SECONDS` | `batch_worker_poll_interval_seconds` | `registry.app.batchWorkerPollIntervalSeconds` | Queue poll cadence. Default 1.0. |
 | Max request bytes | `BATCH_MAX_REQUEST_BYTES` | `batch_max_request_bytes` | `registry.app.batchMaxRequestBytes` | Body size cap. Default 4194304 (4 MiB). |
+| Worker lease TTL | `BATCH_WORKER_LEASE_TTL_SECONDS` | `batch_worker_lease_ttl_seconds` | `registry.app.batchWorkerLeaseTtlSeconds` | Seconds before an unrenewed lease expires. Default 60. |
+| Worker lease heartbeat | `BATCH_WORKER_LEASE_HEARTBEAT_SECONDS` | `batch_worker_lease_heartbeat_seconds` | `registry.app.batchWorkerLeaseHeartbeatSeconds` | Lease renewal interval. Should be below TTL. Default 15. |
 
 ---
 

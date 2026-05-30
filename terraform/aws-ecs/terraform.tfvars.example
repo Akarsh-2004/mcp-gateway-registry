@@ -388,6 +388,12 @@ registry_api_token = "m3zT65wREARMVDToKosg_DgNkKqS_434hNxy3sslGPY"
 # Max request body size (bytes) accepted by the batch endpoint. Default: 4194304 (4 MiB)
 # batch_max_request_bytes = 4194304
 
+# How long a claimed job stays owned before lease expires. Default: 60
+# batch_worker_lease_ttl_seconds = 60
+
+# Interval at which the worker renews the lease. Should be below TTL. Default: 15
+# batch_worker_lease_heartbeat_seconds = 15
+
 # ============================================================================
 # REGISTRATION GATE / ADMISSION CONTROL (Issue #809)
 # ============================================================================

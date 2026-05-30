@@ -790,6 +790,18 @@ variable "batch_max_request_bytes" {
   default     = 4194304
 }
 
+variable "batch_worker_lease_ttl_seconds" {
+  description = "How long a claimed batch job stays owned before its lease expires and another worker may reclaim it."
+  type        = number
+  default     = 60
+}
+
+variable "batch_worker_lease_heartbeat_seconds" {
+  description = "Interval at which a worker renews the lease on its in-flight job. Should be below batch_worker_lease_ttl_seconds."
+  type        = number
+  default     = 15
+}
+
 # Registration gate / admission control (issue #809)
 variable "registration_gate_enabled" {
   description = "Enable registration gate (admission control). Default: false."

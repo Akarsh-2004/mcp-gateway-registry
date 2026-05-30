@@ -1134,6 +1134,14 @@ module "ecs_service_registry" {
           name  = "BATCH_MAX_REQUEST_BYTES"
           value = tostring(var.batch_max_request_bytes)
         },
+        {
+          name  = "BATCH_WORKER_LEASE_TTL_SECONDS"
+          value = tostring(var.batch_worker_lease_ttl_seconds)
+        },
+        {
+          name  = "BATCH_WORKER_LEASE_HEARTBEAT_SECONDS"
+          value = tostring(var.batch_worker_lease_heartbeat_seconds)
+        },
         # Registration gate / admission control (issue #809)
         {
           name  = "REGISTRATION_GATE_ENABLED"

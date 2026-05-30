@@ -138,21 +138,39 @@ class FileServerRepository(ServerRepositoryBase):
             logger.error(f"Failed to save server: {e}", exc_info=True)
             return False
 
+    def _with_state(
+        self,
+        info: dict[str, Any],
+        exclude_tool_list: bool = False,
+    ) -> dict[str, Any]:
+        """Return a shallow copy of a server dict with ``is_enabled`` injected.
+
+        The file backend tracks enabled/disabled state in a separate
+        ``self._state`` map, whereas DocumentDB stores ``is_enabled`` inside the
+        document itself. Callers that iterate ``list_all``/``list_by_ids`` read
+        ``is_enabled`` straight off the dict, so we mirror the DocumentDB
+        contract here. The value is computed fresh on every read rather than
+        cached into ``self._servers`` so it never goes stale when ``set_state``
+        updates only ``self._state``.
+        """
+        enriched = {k: v for k, v in info.items() if not (exclude_tool_list and k == "tool_list")}
+        enriched["is_enabled"] = self._state.get(info.get("path"), False)
+        return enriched
+
     async def get(
         self,
         path: str,
     ) -> dict[str, Any] | None:
         """Get server by path."""
         server_info = self._servers.get(path)
-        if server_info:
-            return server_info
+        if server_info is None:
+            alternate_path = path.rstrip("/") if path.endswith("/") else path + "/"
+            server_info = self._servers.get(alternate_path)
 
-        if path.endswith("/"):
-            alternate_path = path.rstrip("/")
-        else:
-            alternate_path = path + "/"
+        if server_info is None:
+            return None
 
-        return self._servers.get(alternate_path)
+        return self._with_state(server_info)
 
     async def list_all(
         self,
@@ -165,12 +183,8 @@ class FileServerRepository(ServerRepositoryBase):
                 ``tool_list`` field to mirror the DocumentDB projection. The
                 stored documents are not mutated.
         """
-        if not exclude_tool_list:
-            return self._servers.copy()
-
         return {
-            path: {k: v for k, v in info.items() if k != "tool_list"}
-            for path, info in self._servers.items()
+            path: self._with_state(info, exclude_tool_list) for path, info in self._servers.items()
         }
 
     async def list_paginated(

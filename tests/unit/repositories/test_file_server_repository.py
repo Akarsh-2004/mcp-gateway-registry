@@ -309,7 +309,9 @@ class TestFileServerRepositoryIntegration:
 
             # Assert
             assert create_result is True
-            assert get_result == sample_server_dict
+            # get() injects is_enabled from self._state to mirror the
+            # DocumentDB contract; a freshly created server is disabled.
+            assert get_result == {**sample_server_dict, "is_enabled": False}
             assert server_repository._state["/test-server"] is False  # Disabled by default
 
     @pytest.mark.asyncio

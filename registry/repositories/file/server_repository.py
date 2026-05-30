@@ -380,6 +380,10 @@ class FileServerRepository(ServerRepositoryBase):
 
         return result
 
+    async def get_all_states(self) -> dict[str, bool]:
+        """Get enabled/disabled state for all servers in a single read."""
+        return dict(self._state)
+
     async def set_state(
         self,
         path: str,

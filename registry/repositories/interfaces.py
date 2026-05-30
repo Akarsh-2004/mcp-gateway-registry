@@ -157,6 +157,15 @@ class ServerRepositoryBase(ABC):
         pass
 
     @abstractmethod
+    async def get_all_states(self) -> dict[str, bool]:
+        """Get enabled/disabled state for all servers in a single query.
+
+        Returns:
+            Dict mapping server path to enabled (True) or disabled (False).
+        """
+        pass
+
+    @abstractmethod
     async def set_state(
         self,
         path: str,

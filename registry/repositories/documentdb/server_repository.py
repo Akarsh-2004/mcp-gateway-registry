@@ -437,6 +437,22 @@ class DocumentDBServerRepository(ServerRepositoryBase):
             return server_info.get("is_enabled", False)
         return False
 
+    async def get_all_states(self) -> dict[str, bool]:
+        """Get enabled/disabled state for all servers in a single query."""
+        collection = await self._get_collection()
+
+        try:
+            cursor = collection.find({}, {"_id": 1, "is_enabled": 1})
+            states: dict[str, bool] = {}
+            async for doc in cursor:
+                server_path = doc.get("_id")
+                if server_path:
+                    states[server_path] = doc.get("is_enabled", False)
+            return states
+        except Exception as e:
+            logger.error(f"Error getting all server states from DocumentDB: {e}", exc_info=True)
+            return {}
+
     async def set_state(
         self,
         path: str,

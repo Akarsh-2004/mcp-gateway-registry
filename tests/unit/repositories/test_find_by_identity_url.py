@@ -62,6 +62,9 @@ class _FakeServerRepo(ServerRepositoryBase):
     async def get_state(self, path):  # pragma: no cover
         return False
 
+    async def get_all_states(self):  # pragma: no cover
+        return {}
+
     async def set_state(self, path, enabled):  # pragma: no cover
         return False
 

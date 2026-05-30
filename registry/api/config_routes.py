@@ -331,6 +331,20 @@ CONFIG_GROUPS: dict[str, dict[str, Any]] = {
             ("dedup_max_suggestions", "Max Suggestions", False),
         ],
     },
+    "agent_batch": {
+        "title": "Agent Batch API",
+        "order": 22,
+        "fields": [
+            ("batch_worker_enabled", "Worker Enabled", False),
+            ("batch_max_operations_per_job", "Max Operations Per Job", False),
+            ("batch_max_concurrent_jobs_per_user", "Max Concurrent Jobs Per User", False),
+            ("batch_job_retention_days", "Job Retention (days)", False),
+            ("batch_worker_poll_interval_seconds", "Worker Poll Interval (s)", False),
+            ("batch_worker_lease_ttl_seconds", "Worker Lease TTL (s)", False),
+            ("batch_worker_lease_heartbeat_seconds", "Worker Lease Heartbeat (s)", False),
+            ("batch_max_request_bytes", "Max Request Bytes", False),
+        ],
+    },
 }
 
 

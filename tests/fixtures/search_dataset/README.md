@@ -45,41 +45,65 @@ Note: This is a short-lived token. If tests fail with 401 errors, generate a fre
 ### Run
 
 ```bash
-# Test against your deployment
+# Run benchmark and generate report (output defaults to tests/fixtures/search_dataset/)
+uv run python scripts/benchmark_search.py \
+    --url https://your-registry.example.com \
+    --token-file .token
+```
+
+This generates two files:
+- `tests/fixtures/search_dataset/benchmark_results.json` (raw data)
+- `tests/fixtures/search_dataset/benchmark_results.md` (markdown report with NDCG metrics)
+
+Both files are gitignored.
+
+### Additional Options
+
+```bash
+# Custom output path
 uv run python scripts/benchmark_search.py \
     --url https://your-registry.example.com \
     --token-file .token \
-    --output results.json
+    --output /path/to/results.json
 
-# Compare two deployments (e.g., before and after upgrade)
-uv run python scripts/benchmark_search.py \
-    --url https://old-deployment.example.com \
-    --token-file .token \
-    --output results_before.json
+# Regenerate report from existing results
+uv run python scripts/benchmark_search.py --report tests/fixtures/search_dataset/benchmark_results.json
 
-uv run python scripts/benchmark_search.py \
-    --url https://new-deployment.example.com \
-    --token-file .token \
-    --output results_after.json
-
+# Compare two runs side by side (e.g., before and after upgrade)
 uv run python scripts/benchmark_search.py \
     --compare results_before.json results_after.json
 ```
 
-### What It Reports
+### What the Report Contains
 
-For each query:
-- Which servers, tools, agents, skills were returned
-- Their relevance scores
-- Whether results were reranked between runs
-
-Summary:
-- Score health (unique scores vs saturated at 1.0)
-- Side-by-side ranking differences
+- **Quality Metrics:** NDCG@10, MRR, Recall@10 (evaluated against ground truth)
+- **Quality by Category:** breakdown across all 10 query categories
+- **Score Health:** saturation count, unique score values, score range
+- **Per-query results:** ranked results with scores, ground truth comparison (found/missing)
 
 ## Method 2: Standalone Offline Evaluation
 
 Runs both scoring methods (RRF and legacy) locally against the document dataset using the same embedding model as production. No server, Docker, or network required.
+
+### Embedding Model Compatibility
+
+The offline evaluation uses `all-MiniLM-L6-v2` (384 dimensions), which is the default embedding model for the registry. The stored document embeddings in `unified_dataset.json` were generated with this model, and the evaluation script encodes queries with the same model so that cosine similarity is meaningful.
+
+If your deployment uses a different embedding model (e.g., OpenAI `text-embedding-3-small` via LiteLLM, or Amazon Bedrock Titan), the offline evaluation is not supported for that configuration. Use Method 1 (live deployment testing) instead, which queries your real API where both query and document embeddings use whatever model your registry is configured with.
+
+### Prerequisites: Generate the Embedding Dataset
+
+The embedding dataset (`unified_dataset.json`) is not checked into git (it is 4.3MB and may contain deployment-specific content). You must generate it from a running local MongoDB first:
+
+```bash
+# Make sure MongoDB is running (docker ps | grep mongo)
+docker exec mcp-mongodb mongosh --quiet mcp_registry --eval "
+const col = db.mcp_embeddings_384_default;
+print(JSON.stringify(col.find({}).toArray()));
+" > tests/fixtures/search_dataset/unified_dataset.json
+```
+
+This dumps all 378 documents with their 384-dimensional embeddings from the `mcp_embeddings_384_default` collection. The file is gitignored so it won't accidentally be committed.
 
 ### Run
 
@@ -101,6 +125,25 @@ uv run python scripts/evaluate_search.py --method legacy
 ```
 
 First run downloads the embedding model (~80MB from HuggingFace). Subsequent runs use the cached model and complete in ~20 seconds.
+
+### What evaluate_search.py Does
+
+1. Loads `unified_dataset.json` (378 documents with embeddings)
+2. Loads `ground_truth.json` (100 queries with expected results)
+3. For each query, encodes it using the `all-MiniLM-L6-v2` model (same model that created the document embeddings)
+4. Scores all 378 documents using both RRF and legacy methods
+5. Compares the ranked results against ground truth using NDCG@10, MRR, and Recall@10
+6. Prints a summary table comparing both methods
+
+### What benchmark_search.py Does
+
+1. Reads 100 queries from `ground_truth.json`
+2. Sends each query to your live registry's `POST /api/search/semantic` endpoint
+3. Captures the response (scores, ranking, entity types)
+4. Saves raw results to `benchmark_results.json`
+5. Evaluates results against ground truth (NDCG@10, MRR, Recall@10)
+6. Generates `benchmark_results.md` report with metrics, score health, and per-query breakdowns
+7. Supports `--compare` for side-by-side diff of two runs and `--report` to regenerate a report from existing results
 
 ## How the Evaluation Works
 

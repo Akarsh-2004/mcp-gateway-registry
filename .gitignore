@@ -436,3 +436,11 @@ registry_metrics.csv
 # Stress test generated data and results (may move to a separate repo later)
 tests/stress/data/
 tests/stress/results/
+
+# Search evaluation (large dataset + generated results)
+tests/fixtures/search_dataset/unified_dataset.json
+tests/fixtures/search_dataset/benchmark_results.json
+tests/fixtures/search_dataset/benchmark_results.md
+
+# Benchmark search results (generated, not committed)
+results*.json

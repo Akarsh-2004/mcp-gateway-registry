@@ -25,7 +25,7 @@ Usage:
 import argparse
 import json
 import logging
-import sys
+import math
 import time
 from pathlib import Path
 
@@ -38,6 +38,35 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 QUERIES_FILE = Path(__file__).parent.parent / "tests/fixtures/search_dataset/ground_truth.json"
+
+
+def _extract_token(
+    raw: str,
+) -> str:
+    """Extract the access token from various formats.
+
+    Supports:
+    - Plain JWT string (eyJhbG...)
+    - "Bearer eyJhbG..." prefix
+    - Full JSON response from the registry's "Get JWT Token" button
+    """
+    if raw.startswith("{"):
+        try:
+            data = json.loads(raw)
+            token = (
+                data.get("tokens", {}).get("access_token")
+                or data.get("token_data", {}).get("access_token")
+                or data.get("access_token")
+            )
+            if token:
+                return token
+        except json.JSONDecodeError:
+            pass
+
+    if raw.lower().startswith("bearer "):
+        return raw[7:].strip()
+
+    return raw
 
 
 def _load_queries(
@@ -55,12 +84,16 @@ def _run_search(
 ) -> dict:
     """Execute a semantic search query against the deployment."""
     url = f"{base_url}/api/search/semantic"
-    params = {"q": query, "max_results": 10}
-    headers = {}
+    payload = {
+        "query": query,
+        "entity_types": ["mcp_server", "tool", "a2a_agent", "skill", "virtual_server"],
+        "max_results": 10,
+    }
+    headers = {"Content-Type": "application/json"}
     if token:
         headers["Authorization"] = f"Bearer {token}"
 
-    response = requests.get(url, params=params, headers=headers, timeout=30)
+    response = requests.post(url, json=payload, headers=headers, timeout=30)
     response.raise_for_status()
     return response.json()
 
@@ -102,15 +135,43 @@ def _extract_summary(
     return summary
 
 
+def _fetch_registry_stats(
+    base_url: str,
+    token: str | None = None,
+) -> dict:
+    """Fetch registry stats (version, counts, backend)."""
+    headers = {}
+    if token:
+        headers["Authorization"] = f"Bearer {token}"
+    try:
+        response = requests.get(
+            f"{base_url}/api/stats", headers=headers, timeout=10
+        )
+        response.raise_for_status()
+        return response.json()
+    except Exception as e:
+        logger.warning(f"Could not fetch registry stats: {e}")
+        return {}
+
+
 def _run_benchmark(
     base_url: str,
     queries: list[dict],
     token: str | None = None,
 ) -> dict:
     """Run all benchmark queries and collect results."""
+    stats = _fetch_registry_stats(base_url, token)
     results = {
         "url": base_url,
         "timestamp": time.strftime("%Y-%m-%dT%H:%M:%S"),
+        "registry": {
+            "version": stats.get("version", "unknown"),
+            "servers": stats.get("registry_stats", {}).get("servers", 0),
+            "agents": stats.get("registry_stats", {}).get("agents", 0),
+            "skills": stats.get("registry_stats", {}).get("skills", 0),
+            "database_backend": stats.get("database_status", {}).get("backend", "unknown"),
+            "deployment_mode": stats.get("deployment_mode", "unknown"),
+        },
         "queries": [],
     }
 
@@ -243,6 +304,239 @@ def _compare_results(
               f" | B={unique_b} unique scores ({saturated_b} saturated at 1.0)")
 
 
+def _dcg_at_k(
+    relevance_grades: list[int],
+    k: int = 10,
+) -> float:
+    """Compute Discounted Cumulative Gain at position k."""
+    dcg = 0.0
+    for i, grade in enumerate(relevance_grades[:k]):
+        dcg += (2**grade - 1) / math.log2(i + 2)
+    return dcg
+
+
+def _ndcg_at_k(
+    relevance_grades: list[int],
+    ideal_grades: list[int],
+    k: int = 10,
+) -> float:
+    """Compute Normalized Discounted Cumulative Gain at position k."""
+    dcg = _dcg_at_k(relevance_grades, k)
+    idcg = _dcg_at_k(sorted(ideal_grades, reverse=True), k)
+    if idcg == 0:
+        return 0.0
+    return dcg / idcg
+
+
+def _evaluate_query_results(
+    results: dict,
+    expected: list[dict],
+) -> dict:
+    """Evaluate a single query's live results against ground truth."""
+    expected_map = {e["path"]: e["grade"] for e in expected}
+    ideal_grades = sorted([e["grade"] for e in expected], reverse=True)
+
+    result_paths = []
+    for entity_type in ["servers", "tools", "agents", "skills"]:
+        for item in results.get(entity_type, []):
+            path = item.get("path") or item.get("server_path", "")
+            if path and path not in result_paths:
+                result_paths.append(path)
+
+    relevance_grades = [expected_map.get(path, 0) for path in result_paths[:10]]
+    ndcg = _ndcg_at_k(relevance_grades, ideal_grades, 10)
+
+    recall = (
+        sum(1 for path in result_paths[:10] if path in expected_map)
+        / len(expected_map)
+        if expected_map
+        else 0.0
+    )
+
+    first_relevant_rank = None
+    for i, path in enumerate(result_paths[:10]):
+        if path in expected_map:
+            first_relevant_rank = i + 1
+            break
+    mrr = 1.0 / first_relevant_rank if first_relevant_rank else 0.0
+
+    return {
+        "ndcg@10": ndcg,
+        "recall@10": recall,
+        "mrr": mrr,
+        "found": [p for p in result_paths[:10] if p in expected_map],
+        "missing": [p for p in expected_map if p not in result_paths[:10]],
+    }
+
+
+def _generate_report(
+    results_file: Path,
+) -> None:
+    """Generate a markdown report from benchmark results with NDCG metrics."""
+    with open(results_file) as f:
+        data = json.load(f)
+
+    gt_path = Path(__file__).parent.parent / "tests/fixtures/search_dataset/ground_truth.json"
+    ground_truth = {}
+    if gt_path.exists():
+        with open(gt_path) as f:
+            for q in json.load(f):
+                ground_truth[q["query"]] = q
+
+    queries = data.get("queries", [])
+    successful = [q for q in queries if not q.get("error")]
+    failed = [q for q in queries if q.get("error")]
+
+    all_scores = []
+    for q in successful:
+        results = q.get("results", {})
+        for entity_type in ["servers", "tools", "agents", "skills"]:
+            for item in results.get(entity_type, []):
+                if item.get("score") is not None:
+                    all_scores.append(item["score"])
+
+    saturated = sum(1 for s in all_scores if s >= 0.999)
+    unique_scores = len(set(round(s, 4) for s in all_scores))
+    avg_latency = (
+        sum(q.get("elapsed_ms", 0) for q in successful) / len(successful)
+        if successful
+        else 0
+    )
+
+    query_metrics = []
+    for q in successful:
+        gt = ground_truth.get(q["query"])
+        if gt and gt.get("expected"):
+            metrics = _evaluate_query_results(q.get("results", {}), gt["expected"])
+            metrics["query"] = q["query"]
+            metrics["category"] = gt.get("category", "")
+            query_metrics.append(metrics)
+
+    avg_ndcg = (
+        sum(m["ndcg@10"] for m in query_metrics) / len(query_metrics)
+        if query_metrics
+        else 0.0
+    )
+    avg_recall = (
+        sum(m["recall@10"] for m in query_metrics) / len(query_metrics)
+        if query_metrics
+        else 0.0
+    )
+    avg_mrr = (
+        sum(m["mrr"] for m in query_metrics) / len(query_metrics)
+        if query_metrics
+        else 0.0
+    )
+    perfect = sum(1 for m in query_metrics if m["ndcg@10"] == 1.0)
+    zero_hit = sum(1 for m in query_metrics if m["ndcg@10"] == 0.0)
+
+    registry = data.get("registry", {})
+
+    report_path = results_file.with_suffix(".md")
+    with open(report_path, "w") as f:
+        f.write("# Search Benchmark Report\n\n")
+        f.write(f"- **Target:** {data.get('url', 'unknown')}\n")
+        f.write(f"- **Timestamp:** {data.get('timestamp', 'unknown')}\n")
+        f.write(f"- **Version:** {registry.get('version', 'unknown')}\n")
+        f.write(f"- **Database:** {registry.get('database_backend', 'unknown')}\n")
+        f.write(f"- **Registry contents:** {registry.get('servers', 0)} servers, "
+                f"{registry.get('agents', 0)} agents, {registry.get('skills', 0)} skills\n")
+        f.write(f"- **Queries:** {len(queries)} total, {len(successful)} succeeded, {len(failed)} failed\n")
+        f.write(f"- **Avg latency:** {avg_latency:.0f}ms per query\n\n")
+
+        f.write("## Quality Metrics (against ground truth)\n\n")
+        f.write(f"| Metric | Value |\n")
+        f.write(f"|--------|-------|\n")
+        f.write(f"| NDCG@10 (avg) | {avg_ndcg:.4f} |\n")
+        f.write(f"| MRR (avg) | {avg_mrr:.4f} |\n")
+        f.write(f"| Recall@10 (avg) | {avg_recall:.4f} |\n")
+        f.write(f"| Perfect queries (NDCG=1.0) | {perfect} / {len(query_metrics)} |\n")
+        f.write(f"| Zero-hit queries (NDCG=0.0) | {zero_hit} / {len(query_metrics)} |\n")
+        f.write(f"| Evaluated queries | {len(query_metrics)} (queries with ground truth expectations) |\n")
+        skipped = len(successful) - len(query_metrics)
+        if skipped > 0:
+            f.write(f"| Skipped from eval | {skipped} (no-answer queries with empty expected results) |\n")
+        if failed:
+            f.write(f"| Failed queries | {len(failed)} (API rejected, e.g. empty query) |\n")
+        f.write("\n")
+
+        f.write("## Score Health\n\n")
+        f.write(f"| Metric | Value |\n")
+        f.write(f"|--------|-------|\n")
+        f.write(f"| Total scores in results | {len(all_scores)} |\n")
+        f.write(f"| Unique score values | {unique_scores} |\n")
+        f.write(f"| Saturated at 1.0 | {saturated} ({saturated*100//max(len(all_scores),1)}%) |\n")
+        if all_scores:
+            f.write(f"| Score range | {min(all_scores):.4f} to {max(all_scores):.4f} |\n\n")
+
+        if query_metrics:
+            cat_metrics: dict[str, list] = {}
+            for m in query_metrics:
+                cat = m.get("category", "unknown")
+                if cat not in cat_metrics:
+                    cat_metrics[cat] = []
+                cat_metrics[cat].append(m)
+
+            f.write("## Quality by Category\n\n")
+            f.write("| Category | Queries | NDCG@10 | MRR | Recall@10 |\n")
+            f.write("|----------|---------|---------|-----|----------|\n")
+            for cat, metrics in sorted(cat_metrics.items()):
+                n = len(metrics)
+                cat_ndcg = sum(m["ndcg@10"] for m in metrics) / n
+                cat_mrr = sum(m["mrr"] for m in metrics) / n
+                cat_recall = sum(m["recall@10"] for m in metrics) / n
+                f.write(f"| {cat} | {n} | {cat_ndcg:.3f} | {cat_mrr:.3f} | {cat_recall:.3f} |\n")
+            f.write("\n")
+
+        f.write("## Results by Query\n\n")
+        for q in successful[:30]:
+            results = q.get("results", {})
+            total = q.get("total_results", 0)
+            f.write(f"### \"{q['query']}\"\n\n")
+            if q.get("description"):
+                f.write(f"*{q['description']}*\n\n")
+
+            gt = ground_truth.get(q["query"])
+            if gt and gt.get("expected"):
+                metrics = _evaluate_query_results(results, gt["expected"])
+                f.write(
+                    f"NDCG@10={metrics['ndcg@10']:.3f} | "
+                    f"MRR={metrics['mrr']:.3f} | "
+                    f"Recall={metrics['recall@10']:.2f}"
+                )
+                if metrics["found"]:
+                    f.write(f" | Found: {', '.join(metrics['found'][:3])}")
+                if metrics["missing"]:
+                    f.write(f" | Missing: {', '.join(metrics['missing'][:2])}")
+                f.write("\n\n")
+
+            f.write(f"Latency: {q.get('elapsed_ms', 0):.0f}ms | Results: {total} total\n\n")
+
+            for entity_type in ["servers", "tools", "agents", "skills"]:
+                items = results.get(entity_type, [])
+                if not items:
+                    continue
+                f.write(f"**{entity_type.title()}:**\n\n")
+                f.write("| # | Name | Score |\n")
+                f.write("|---|------|-------|\n")
+                for i, item in enumerate(items[:5]):
+                    name = item.get("name", "unknown")
+                    score = item.get("score", 0)
+                    f.write(f"| {i+1} | {name} | {score:.4f} |\n")
+                f.write("\n")
+
+            f.write("---\n\n")
+
+        if failed:
+            f.write("## Failed Queries\n\n")
+            f.write("| Query | Error |\n")
+            f.write("|-------|-------|\n")
+            for q in failed:
+                f.write(f"| {q['query']} | {q.get('error', 'unknown')[:80]} |\n")
+
+    print(f"Report saved to: {report_path}")
+
+
 def main():
     """Parse args and run benchmark or comparison."""
     parser = argparse.ArgumentParser(
@@ -293,15 +587,30 @@ Example usage:
         metavar=("FILE_A", "FILE_B"),
         help="Compare two benchmark result files",
     )
+    parser.add_argument(
+        "--report",
+        type=str,
+        metavar="RESULTS_FILE",
+        help="Generate a markdown report from a results JSON file",
+    )
 
     args = parser.parse_args()
+
+    if args.report:
+        _generate_report(Path(args.report))
+        return
 
     if args.compare:
         _compare_results(Path(args.compare[0]), Path(args.compare[1]))
         return
 
-    if not args.url or not args.output:
-        parser.error("--url and --output are required when not using --compare")
+    if not args.url:
+        parser.error("--url is required when not using --compare or --report")
+
+    if not args.output:
+        output_dir = Path(__file__).parent.parent / "tests/fixtures/search_dataset"
+        output_dir.mkdir(parents=True, exist_ok=True)
+        args.output = str(output_dir / "benchmark_results.json")
 
     token = args.token
     if not token and args.token_file:
@@ -309,10 +618,7 @@ Example usage:
         if not token_path.exists():
             parser.error(f"Token file not found: {token_path}")
         raw = token_path.read_text().strip()
-        if raw.lower().startswith("bearer "):
-            token = raw[7:]
-        else:
-            token = raw
+        token = _extract_token(raw)
 
     queries = _load_queries(Path(args.queries))
     logger.info(f"Loaded {len(queries)} benchmark queries")
@@ -325,6 +631,8 @@ Example usage:
         json.dump(results, f, indent=2)
 
     logger.info(f"Results saved to {output_path}")
+
+    _generate_report(output_path)
 
 
 if __name__ == "__main__":

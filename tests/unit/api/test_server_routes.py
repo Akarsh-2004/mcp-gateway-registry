@@ -936,6 +936,153 @@ class TestRegisterService:
             call_args = mock_server_service.register_server.call_args[0][0]
             assert call_args["path"] == "/new-server"
 
+    def test_register_service_metadata_omitted_defaults_to_empty_dict(
+        self,
+        test_client_admin,
+        mock_server_service,
+        mock_faiss_service,
+        mock_nginx_service,
+        mock_nginx_reload_scheduler,
+        mock_health_service,
+    ):
+        """Test that omitting metadata persists an empty dict, not None."""
+        # Arrange
+        mock_server_service.register_server.return_value = {
+            "success": True,
+            "message": "Server registered successfully",
+            "is_new_version": False,
+        }
+
+        with patch(
+            "registry.auth.dependencies.user_has_ui_permission_for_service", return_value=True
+        ):
+            # Act - register without the metadata field
+            response = test_client_admin.post(
+                "/api/register",
+                data={
+                    "name": "No Metadata Server",
+                    "description": "Test",
+                    "path": "/no-metadata",
+                    "proxy_pass_url": "http://localhost:9000",
+                },
+            )
+
+            # Assert - metadata is always a dict in the persisted entry
+            assert response.status_code == 201
+            server_entry = mock_server_service.register_server.call_args[0][0]
+            assert server_entry["metadata"] == {}
+
+    def test_register_service_empty_metadata_defaults_to_empty_dict(
+        self,
+        test_client_admin,
+        mock_server_service,
+        mock_faiss_service,
+        mock_nginx_service,
+        mock_nginx_reload_scheduler,
+        mock_health_service,
+    ):
+        """Test that an empty metadata JSON object is accepted."""
+        # Arrange
+        mock_server_service.register_server.return_value = {
+            "success": True,
+            "message": "Server registered successfully",
+            "is_new_version": False,
+        }
+
+        with patch(
+            "registry.auth.dependencies.user_has_ui_permission_for_service", return_value=True
+        ):
+            # Act - register with an explicit empty metadata object
+            response = test_client_admin.post(
+                "/api/register",
+                data={
+                    "name": "Empty Metadata Server",
+                    "description": "Test",
+                    "path": "/empty-metadata",
+                    "proxy_pass_url": "http://localhost:9000",
+                    "metadata": "{}",
+                },
+            )
+
+            # Assert
+            assert response.status_code == 201
+            server_entry = mock_server_service.register_server.call_args[0][0]
+            assert server_entry["metadata"] == {}
+
+    def test_register_service_metadata_preserved_when_provided(
+        self,
+        test_client_admin,
+        mock_server_service,
+        mock_faiss_service,
+        mock_nginx_service,
+        mock_nginx_reload_scheduler,
+        mock_health_service,
+    ):
+        """Test that populated metadata is preserved."""
+        # Arrange
+        mock_server_service.register_server.return_value = {
+            "success": True,
+            "message": "Server registered successfully",
+            "is_new_version": False,
+        }
+
+        with patch(
+            "registry.auth.dependencies.user_has_ui_permission_for_service", return_value=True
+        ):
+            # Act - register with populated metadata
+            response = test_client_admin.post(
+                "/api/register",
+                data={
+                    "name": "Metadata Server",
+                    "description": "Test",
+                    "path": "/with-metadata",
+                    "proxy_pass_url": "http://localhost:9000",
+                    "metadata": '{"team": "platform", "tier": "gold"}',
+                },
+            )
+
+            # Assert
+            assert response.status_code == 201
+            server_entry = mock_server_service.register_server.call_args[0][0]
+            assert server_entry["metadata"] == {"team": "platform", "tier": "gold"}
+
+    def test_register_service_metadata_json_null_defaults_to_empty_dict(
+        self,
+        test_client_admin,
+        mock_server_service,
+        mock_faiss_service,
+        mock_nginx_service,
+        mock_nginx_reload_scheduler,
+        mock_health_service,
+    ):
+        """Test that metadata sent as the JSON string 'null' coerces to {}."""
+        # Arrange
+        mock_server_service.register_server.return_value = {
+            "success": True,
+            "message": "Server registered successfully",
+            "is_new_version": False,
+        }
+
+        with patch(
+            "registry.auth.dependencies.user_has_ui_permission_for_service", return_value=True
+        ):
+            # Act - a truthy form value that parses to None must not persist None
+            response = test_client_admin.post(
+                "/api/register",
+                data={
+                    "name": "Null Metadata Server",
+                    "description": "Test",
+                    "path": "/null-metadata",
+                    "proxy_pass_url": "http://localhost:9000",
+                    "metadata": "null",
+                },
+            )
+
+            # Assert
+            assert response.status_code == 201
+            server_entry = mock_server_service.register_server.call_args[0][0]
+            assert server_entry["metadata"] == {}
+
 
 # =============================================================================
 # TEST POST /internal/register - Internal Registration

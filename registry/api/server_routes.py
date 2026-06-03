@@ -1035,6 +1035,7 @@ async def register_service(
         "allowed_groups": allowed_groups_list,
         "deployment": deployment,
         "registered_by": user_context["username"],
+        "metadata": {},
     }
 
     # Deployment-specific fields
@@ -1052,7 +1053,8 @@ async def register_service(
         try:
             import json
 
-            server_entry["metadata"] = json.loads(metadata)
+            parsed_metadata = json.loads(metadata)
+            server_entry["metadata"] = parsed_metadata if parsed_metadata is not None else {}
         except json.JSONDecodeError:
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
@@ -1338,6 +1340,7 @@ async def internal_register_service(
         "tool_list": tool_list,
         "visibility": visibility,
         "allowed_groups": allowed_groups_list,
+        "metadata": {},
     }
 
     # Add optional fields if provided
@@ -1349,9 +1352,8 @@ async def internal_register_service(
         server_entry["auth_header_name"] = auth_header_name
     if metadata:
         try:
-            server_entry["metadata"] = (
-                json.loads(metadata) if isinstance(metadata, str) else metadata
-            )
+            parsed_metadata = json.loads(metadata) if isinstance(metadata, str) else metadata
+            server_entry["metadata"] = parsed_metadata if parsed_metadata is not None else {}
         except json.JSONDecodeError:
             return JSONResponse(
                 status_code=400,
@@ -3444,6 +3446,7 @@ async def register_service_api(
         "tool_list": tool_list,
         "deployment": deployment,
         "registered_by": user_context.get("username"),
+        "metadata": {},
     }
 
     # Deployment-specific fields
@@ -3561,9 +3564,8 @@ async def register_service_api(
 
     if metadata:
         try:
-            server_entry["metadata"] = (
-                json.loads(metadata) if isinstance(metadata, str) else metadata
-            )
+            parsed_metadata = json.loads(metadata) if isinstance(metadata, str) else metadata
+            server_entry["metadata"] = parsed_metadata if parsed_metadata is not None else {}
         except json.JSONDecodeError:
             return JSONResponse(
                 status_code=400,

@@ -29,13 +29,16 @@ from registry.api.agent_routes import router as agent_router
 from registry.api.ans_routes import router as ans_router
 from registry.api.auth0_m2m_routes import router as auth0_m2m_router
 from registry.api.config_routes import router as config_router
+from registry.api.custom_entity_routes import router as custom_entity_router
+from registry.api.custom_type_routes import router as custom_type_router
+from registry.api.embeddings_admin_routes import router as embeddings_admin_router
 from registry.api.export_routes import router as export_router
 from registry.api.federation_export_routes import router as federation_export_router
 from registry.api.federation_routes import router as federation_router
+from registry.api.iam_user_groups_routes import router as iam_user_groups_router
 from registry.api.internal_routes import router as internal_router
 from registry.api.log_routes import router as log_router
 from registry.api.m2m_management_routes import router as m2m_management_router
-from registry.api.embeddings_admin_routes import router as embeddings_admin_router
 from registry.api.management_routes import router as management_router
 from registry.api.okta_m2m_routes import router as okta_m2m_router
 from registry.api.peer_management_routes import router as peer_management_router
@@ -55,7 +58,6 @@ from registry.audit.routes import router as audit_router
 
 # Import auth dependencies
 from registry.auth.dependencies import (
-    get_ui_permissions_for_user,
     nginx_proxied_auth,
 )
 
@@ -65,6 +67,7 @@ from registry.auth.routes import router as auth_router
 # Import core configuration
 from registry.core.config import (
     MONGODB_BACKENDS,
+    InternalDeploymentType,
     RegistryMode,
     _print_config_warning_banner,
     _validate_mode_combination,
@@ -106,12 +109,43 @@ logger = logging.getLogger(__name__)
 logger.info(f"Logging configured. Writing to file: {log_file_path}")
 
 
+def _resolve_internal_deployment_classification() -> None:
+    """Apply the internal-deployment default/correction rules at startup.
+
+    Rules (see issue #1216):
+      - internal_only_deployment is False -> internal_deployment_type forced to NONE
+        (warn if a non-none type was supplied, since it would be misleading).
+      - internal_only_deployment is True and type is NONE -> default to DEV.
+
+    Uses object.__setattr__ because Settings is frozen at runtime, mirroring the
+    deployment-mode correction below.
+    """
+    is_internal = settings.internal_only_deployment
+    current_type = settings.internal_deployment_type
+
+    if not is_internal:
+        if current_type != InternalDeploymentType.NONE:
+            logger.warning(
+                "INTERNAL_DEPLOYMENT_TYPE=%s ignored because INTERNAL_ONLY_DEPLOYMENT "
+                "is false; forcing to 'none'.",
+                current_type.value,
+            )
+            object.__setattr__(settings, "internal_deployment_type", InternalDeploymentType.NONE)
+        return
+
+    if current_type == InternalDeploymentType.NONE:
+        logger.info("INTERNAL_ONLY_DEPLOYMENT is true with no type set; defaulting to 'dev'.")
+        object.__setattr__(settings, "internal_deployment_type", InternalDeploymentType.DEV)
+
+
 def _log_startup_configuration() -> None:
     """Log startup configuration with clear formatting."""
     logger.info("=" * 60)
     logger.info("Registry starting with:")
     logger.info(f"  - DEPLOYMENT_MODE: {settings.deployment_mode.value}")
     logger.info(f"  - REGISTRY_MODE: {settings.registry_mode.value}")
+    logger.info(f"  - INTERNAL_ONLY_DEPLOYMENT: {settings.internal_only_deployment}")
+    logger.info(f"  - INTERNAL_DEPLOYMENT_TYPE: {settings.internal_deployment_type.value}")
     logger.info(f"  - Nginx updates: {'ENABLED' if settings.nginx_updates_enabled else 'DISABLED'}")
 
     # Log what's disabled based on registry mode
@@ -420,6 +454,9 @@ async def lifespan(app: FastAPI):
         # Update settings (use object.__setattr__ for frozen pydantic settings)
         object.__setattr__(settings, "deployment_mode", corrected_deployment)
         object.__setattr__(settings, "registry_mode", corrected_registry)
+
+    # Apply internal-deployment classification default/correction (issue #1216)
+    _resolve_internal_deployment_classification()
 
     # Log startup configuration
     _log_startup_configuration()
@@ -1076,6 +1113,10 @@ app.include_router(federation_router, prefix="/api", tags=["federation"])
 app.include_router(skill_router, prefix="/api", tags=["skills"])
 app.include_router(config_router, prefix="/api/config", tags=["config"])
 app.include_router(virtual_server_router, prefix="/api", tags=["virtual-servers"])
+if settings.custom_entity_types_enabled:
+    app.include_router(custom_type_router, prefix="/api", tags=["custom-types"])
+    app.include_router(custom_entity_router, prefix="/api", tags=["custom-entities"])
+    logger.info("Custom entity types feature enabled; registered custom-type/custom routes")
 app.include_router(internal_router, prefix="/api")
 app.include_router(health_router, prefix="/api/health", tags=["Health Monitoring"])
 app.include_router(federation_export_router)
@@ -1094,6 +1135,11 @@ app.include_router(auth0_m2m_router, prefix="/api", tags=["Auth0 M2M"])
 # Does not require IdP Admin API token. Gated by feature flag.
 if settings.m2m_direct_registration_enabled:
     app.include_router(m2m_management_router, prefix="/api", tags=["M2M Management"])
+
+# Direct user-to-group fallback registration API (issue #1127). The router
+# already declares its full /api/iam/user-groups prefix and tag, so include
+# it without an additional prefix override.
+app.include_router(iam_user_groups_router)
 
 # Register Anthropic MCP Registry API (public API for MCP servers only)
 app.include_router(registry_router, prefix="/api/registry", tags=["Registry Card"])
@@ -1151,8 +1197,10 @@ async def get_current_user(user_context: dict[str, Any] = Depends(nginx_proxied_
     # Get user's scopes
     user_scopes = user_context.get("scopes", [])
 
-    # Get UI permissions for the user based on their scopes
-    ui_permissions = await get_ui_permissions_for_user(user_scopes)
+    # UI permissions are already derived by nginx_proxied_auth/_derive_user_context
+    # and carried on user_context — reuse them instead of re-querying the scope
+    # repo here, which previously ran a second per-scope fan-out per /me call.
+    ui_permissions = user_context.get("ui_permissions", {})
 
     # Return user info with scopes and UI permissions for token generation
     return {

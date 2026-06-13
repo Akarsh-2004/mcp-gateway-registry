@@ -2,9 +2,10 @@ import logging
 from datetime import UTC
 from enum import Enum
 from pathlib import Path
+from typing import Annotated
 
 from pydantic import Field, field_validator
-from pydantic_settings import BaseSettings, SettingsConfigDict
+from pydantic_settings import BaseSettings, NoDecode, SettingsConfigDict
 
 # Accepted values for STORAGE_BACKEND. Keep in sync with the Terraform allowlist
 # at terraform/aws-ecs/variables.tf (issue #955) so both layers reject the same
@@ -48,6 +49,15 @@ class RegistryMode(str, Enum):
     SKILLS_ONLY = "skills-only"
     MCP_SERVERS_ONLY = "mcp-servers-only"
     AGENTS_ONLY = "agents-only"
+
+
+class InternalDeploymentType(str, Enum):
+    """Classification of an internal/workshop deployment (telemetry label only)."""
+
+    NONE = "none"
+    DEV = "dev"
+    WORKSHOP = "workshop"
+    OTHER = "other"
 
 
 class Settings(BaseSettings):
@@ -161,6 +171,40 @@ class Settings(BaseSettings):
     # or 'legacy' (previous additive formula). RRF avoids score saturation and
     # handles missing embeddings gracefully.
     search_fusion_method: str = "rrf"
+
+    # Custom entity types (admin-defined schema-driven catalog types)
+    custom_entity_types_enabled: bool = Field(
+        default=False,
+        description=(
+            "Enable admin-defined custom catalog entity types. This is a "
+            "feature-invisible kill-switch, not a pause-new-usage flag: when "
+            "false the CRUD routers are unregistered (404), the tabs/config "
+            "list is empty, and custom types are excluded from both the search "
+            "scope and result processing. Existing records remain in the DB but "
+            "are unreachable until the flag is re-enabled."
+        ),
+    )
+    custom_type_cache_ttl_seconds: float = Field(
+        default=60.0,
+        description="TTL for the in-process custom-type descriptor cache (seconds)",
+    )
+    max_custom_records_per_type: int = Field(
+        default=1000,
+        description=(
+            "Soft cap on records per custom type (0 = unlimited). Best-effort: "
+            "the count-then-create check may overshoot slightly under concurrent "
+            "creates; it is not a hard transactional guarantee. Guards against "
+            "runaway imports hitting the embedding-collection scaling ceiling."
+        ),
+    )
+    max_custom_types: int = Field(
+        default=50,
+        description=(
+            "Cap on the number of custom entity TYPES an admin can define "
+            "(0 = unlimited). Guards against unbounded type creation, each of "
+            "which carries its own embedding collection. Enforced at type create."
+        ),
+    )
 
     # LiteLLM-specific settings (only used when embeddings_provider='litellm')
     # For Bedrock: Set to None and configure AWS credentials via standard methods
@@ -451,6 +495,44 @@ class Settings(BaseSettings):
         ),
     )
 
+    # User-to-group fallback for IdPs that don't carry groups in JWTs (issue #1127).
+    # Auth server consults the idp_user_groups collection only when the JWT's
+    # groups claim is empty AND the token's provider name appears in this list.
+    # Annotated with NoDecode so pydantic-settings does NOT try to JSON-parse
+    # the env var; the field_validator below handles the CSV split itself.
+    idp_user_group_fallback_enabled_providers: Annotated[list[str], NoDecode] = Field(
+        default_factory=lambda: ["pingfederate"],
+        description=(
+            "Comma-separated list of IdP providers for which the auth server should "
+            "consult the idp_user_groups collection when the JWT's groups claim is "
+            "empty. Read from IDP_USER_GROUP_FALLBACK_ENABLED_PROVIDERS. "
+            "Default: 'pingfederate'."
+        ),
+    )
+
+    @field_validator("idp_user_group_fallback_enabled_providers", mode="before")
+    @classmethod
+    def _parse_idp_user_group_fallback_enabled_providers(
+        cls,
+        v: object,
+    ) -> list[str]:
+        """Accept either a CSV string (from env var) or a list (from defaults).
+
+        Empty/whitespace entries are dropped, and values are lowercased to
+        match the case of provider names emitted by the auth layer
+        (e.g. 'pingfederate', 'okta').
+        """
+        if v is None or v == "":
+            return []
+        if isinstance(v, list):
+            return [str(item).strip().lower() for item in v if str(item).strip()]
+        if isinstance(v, str):
+            return [item.strip().lower() for item in v.split(",") if item.strip()]
+        raise ValueError(
+            "IDP_USER_GROUP_FALLBACK_ENABLED_PROVIDERS must be a CSV string or list, "
+            f"got {type(v).__name__}"
+        )
+
     # ANS Integration
     ans_integration_enabled: bool = Field(
         default=False,
@@ -565,6 +647,28 @@ class Settings(BaseSettings):
     )
     registry_mode: RegistryMode = Field(
         default=RegistryMode.FULL, description="Registry operating mode"
+    )
+
+    # Internal/workshop deployment classification (telemetry labels only; see issue
+    # #1216). These are self-reported labels for tracing our own internal and workshop
+    # deployments in telemetry. They do NOT change access control or network behavior.
+    # The cross-field default/correction logic (force to "none" when not internal,
+    # default to "dev" when internal and unset) runs at startup in main.py, mirroring
+    # the deployment_mode/registry_mode correction pattern.
+    internal_only_deployment: bool = Field(
+        default=False,
+        description=(
+            "Marks this as one of our own internal/workshop deployments (not a "
+            "community install). Telemetry label only; does not change access control."
+        ),
+    )
+    internal_deployment_type: InternalDeploymentType = Field(
+        default=InternalDeploymentType.NONE,
+        description=(
+            "Classification of an internal deployment: none, dev, workshop, or other. "
+            "Forced to 'none' when internal_only_deployment is false; defaults to 'dev' "
+            "when internal_only_deployment is true and left unset."
+        ),
     )
 
     # Coding assistant selection for the Server Configuration modal.
@@ -830,6 +934,37 @@ class Settings(BaseSettings):
         if normalized not in ALLOWED_STORAGE_BACKENDS:
             accepted = ", ".join(sorted(ALLOWED_STORAGE_BACKENDS))
             raise ValueError(f"Invalid STORAGE_BACKEND={v!r}. Accepted values: {accepted}.")
+        return normalized
+
+    @field_validator("internal_deployment_type", mode="before")
+    @classmethod
+    def _validate_internal_deployment_type(
+        cls,
+        v: str | None,
+    ) -> str:
+        """Reject unknown INTERNAL_DEPLOYMENT_TYPE values at startup.
+
+        Empty string and None coerce to "none". Any other value is normalized
+        (stripped, lowercased) and compared against the InternalDeploymentType
+        members. Unknown values raise ValueError listing the accepted values.
+
+        Safe to echo v in the error: this is a non-secret config name.
+        """
+        if v is None or v == "":
+            return InternalDeploymentType.NONE.value
+        if isinstance(v, InternalDeploymentType):
+            return v.value
+        if not isinstance(v, str):
+            raise ValueError(
+                f"INTERNAL_DEPLOYMENT_TYPE must be a string, got {type(v).__name__}"
+            )
+        normalized = v.strip().lower()
+        valid = {t.value for t in InternalDeploymentType}
+        if normalized not in valid:
+            accepted = ", ".join(sorted(valid))
+            raise ValueError(
+                f"Invalid INTERNAL_DEPLOYMENT_TYPE={v!r}. Accepted values: {accepted}."
+            )
         return normalized
 
     # DocumentDB Configuration (only used when storage_backend="documentdb" or "mongodb-ce")

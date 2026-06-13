@@ -183,8 +183,14 @@ async def get_ui_permissions_for_user(user_scopes: list[str]) -> dict[str, list[
     ui_permissions = {}
     scope_repo = get_scope_repository()
 
+    # One round-trip for all scopes instead of one find_one per scope — on a
+    # remote cluster the per-scope fan-out dominated /api/auth/me latency for
+    # users with many groups. Iterate user_scopes (not the map) to keep the
+    # merge order deterministic.
+    scope_configs = await scope_repo.get_ui_scopes_bulk(user_scopes)
+
     for scope in user_scopes:
-        scope_config = await scope_repo.get_ui_scopes(scope)
+        scope_config = scope_configs.get(scope)
         if scope_config:
             logger.debug(f"Processing UI scope '{scope}' with config: {scope_config}")
 
@@ -608,8 +614,14 @@ async def nginx_proxied_auth(
         f"[NGINX_AUTH_DEBUG] Authorization header: {request.headers.get('authorization', 'NOT PRESENT')[:50] if request.headers.get('authorization') else 'NOT PRESENT'}"
     )
 
-    # Log ALL headers for complete diagnostic
-    all_headers = dict(request.headers)
+    # Log ALL headers for complete diagnostic, with sensitive values redacted.
+    # cookie/authorization carry the session and bearer token; even at DEBUG we
+    # don't want them in logs.
+    _redacted_header_names = {"cookie", "authorization"}
+    all_headers = {
+        name: ("[REDACTED]" if name.lower() in _redacted_header_names else value)
+        for name, value in request.headers.items()
+    }
     logger.debug(f"[NGINX_AUTH_DEBUG] ALL REQUEST HEADERS: {all_headers}")
 
     # First, try to get user context from nginx headers (JWT Bearer token flow)

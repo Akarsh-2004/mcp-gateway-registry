@@ -22,6 +22,12 @@ try:
 except ImportError:
     VirtualServerConfig = None
 
+try:
+    from ..schemas.custom_entity_models import CustomEntityRecord, CustomTypeDescriptor
+except ImportError:
+    CustomEntityRecord = None
+    CustomTypeDescriptor = None
+
 
 class ServerRepositoryBase(ABC):
     """Abstract base class for MCP server data access."""
@@ -491,6 +497,60 @@ class ScopeRepositoryBase(ABC):
             Returns empty list if scope not found.
         """
         pass
+
+    async def get_server_scopes_bulk(
+        self,
+        scope_names: list[str],
+    ) -> dict[str, list[dict[str, Any]]]:
+        """Get server access rules for many scopes in one call.
+
+        Batch equivalent of ``get_server_scopes``. On the cookie-auth hot
+        path a user with many groups resolves to many scopes, and issuing
+        one query per scope serializes a round-trip per scope — cheap on a
+        local Mongo, seconds on a remote Atlas cluster (Issue: scope
+        fan-out latency). Backends that can fetch all scopes in a single
+        query (DocumentDB ``$in``) override this; the default loops over
+        the per-scope method so in-memory backends (file) stay correct
+        with no extra cost.
+
+        Args:
+            scope_names: Scope names to fetch.
+
+        Returns:
+            Dict mapping scope name to its access-rule list. Scopes with no
+            rules are omitted (mirrors the empty-list return of the single
+            getter, while keeping the map compact).
+        """
+        result: dict[str, list[dict[str, Any]]] = {}
+        for scope_name in scope_names:
+            rules = await self.get_server_scopes(scope_name)
+            if rules:
+                result[scope_name] = rules
+        return result
+
+    async def get_ui_scopes_bulk(
+        self,
+        group_names: list[str],
+    ) -> dict[str, dict[str, Any]]:
+        """Get UI scopes for many groups/scopes in one call.
+
+        Batch equivalent of ``get_ui_scopes`` — see ``get_server_scopes_bulk``
+        for the latency rationale. Backends with a single-query path override
+        this; the default loops over the per-scope getter.
+
+        Args:
+            group_names: Group/scope names to fetch.
+
+        Returns:
+            Dict mapping group/scope name to its UI-permissions dict. Names
+            with no UI permissions are omitted.
+        """
+        result: dict[str, dict[str, Any]] = {}
+        for group_name in group_names:
+            scopes = await self.get_ui_scopes(group_name)
+            if scopes:
+                result[group_name] = scopes
+        return result
 
     @abstractmethod
     async def load_all(self) -> None:
@@ -1083,6 +1143,53 @@ class SearchRepositoryBase(ABC):
         """
         return None
 
+    async def index_custom_entity(
+        self,
+        record: Any,
+        descriptor: Any,
+    ) -> None:
+        """Index a custom entity record for search.
+
+        Default implementation is a no-op. Override in implementations
+        that support custom entity indexing.
+
+        Args:
+            record: CustomEntityRecord to index.
+            descriptor: CustomTypeDescriptor describing the record's type.
+        """
+        return None
+
+    async def delete_custom_entity_index(
+        self,
+        path: str,
+    ) -> None:
+        """Remove a single custom entity record's embedding.
+
+        Default implementation is a no-op. Override in implementations
+        that support custom entity indexing.
+
+        Args:
+            path: Record path (e.g., /workflow/<uuid>).
+        """
+        return None
+
+    async def delete_custom_entity_index_by_type(
+        self,
+        entity_type: str,
+    ) -> int:
+        """Bulk-remove all embeddings for a custom type.
+
+        Default implementation is a no-op returning 0. Override in
+        implementations that support custom entity indexing.
+
+        Args:
+            entity_type: The custom type name to purge.
+
+        Returns:
+            Number of embeddings removed.
+        """
+        return 0
+
     async def search_by_tags(
         self,
         tags: list[str],
@@ -1656,4 +1763,139 @@ class RegistryCardRepositoryBase(ABC):
     @abstractmethod
     async def exists(self) -> bool:
         """Check if Registry Card exists."""
+        pass
+
+
+class CustomTypeRepositoryBase(ABC):
+    """Abstract base class for custom entity type descriptor storage."""
+
+    @abstractmethod
+    async def ensure_indexes(self) -> None:
+        """Create required indexes if not present."""
+        pass
+
+    @abstractmethod
+    async def create(
+        self,
+        descriptor: "CustomTypeDescriptor",
+    ) -> "CustomTypeDescriptor":
+        """Create a new type descriptor.
+
+        Raises:
+            CustomTypeAlreadyExistsError: If a type with this name exists.
+        """
+        pass
+
+    @abstractmethod
+    async def get(
+        self,
+        name: str,
+    ) -> "CustomTypeDescriptor | None":
+        """Get a type descriptor by name."""
+        pass
+
+    @abstractmethod
+    async def list_all(self) -> "list[CustomTypeDescriptor]":
+        """List all type descriptors, sorted by name."""
+        pass
+
+    @abstractmethod
+    async def delete(
+        self,
+        name: str,
+    ) -> bool:
+        """Delete a type descriptor. Returns True if a document was removed."""
+        pass
+
+    @abstractmethod
+    async def update_metadata(
+        self,
+        name: str,
+        updates: dict[str, Any],
+    ) -> "CustomTypeDescriptor | None":
+        """Update mutable metadata (display_name/description) of a type.
+
+        Only the keys present in ``updates`` are written; the immutable
+        ``name``/``fields`` are never touched. Returns the updated descriptor,
+        or None if no type with this name exists.
+        """
+        pass
+
+
+class CustomEntityRepositoryBase(ABC):
+    """Abstract base class for custom entity record storage (single collection)."""
+
+    @abstractmethod
+    async def ensure_indexes(self) -> None:
+        """Create required indexes if not present."""
+        pass
+
+    @abstractmethod
+    async def create(
+        self,
+        record: "CustomEntityRecord",
+    ) -> "CustomEntityRecord":
+        """Create a new record (``_id`` = record.path)."""
+        pass
+
+    @abstractmethod
+    async def get(
+        self,
+        path: str,
+    ) -> "CustomEntityRecord | None":
+        """Get a record by its synthetic path."""
+        pass
+
+    @abstractmethod
+    async def list_paginated(
+        self,
+        entity_type: str,
+        skip: int = 0,
+        limit: int = 100,
+        visibility_filter: dict[str, Any] | None = None,
+    ) -> "list[CustomEntityRecord]":
+        """List records of a type with DB-level pagination and optional filter.
+
+        Args:
+            entity_type: The custom type discriminator.
+            skip: Number of documents to skip.
+            limit: Maximum number of documents to return.
+            visibility_filter: Optional Mongo predicate composed with the
+                type discriminator to restrict results to records the caller
+                may see. None = no restriction (admin).
+        """
+        pass
+
+    @abstractmethod
+    async def update(
+        self,
+        path: str,
+        updates: dict[str, Any],
+    ) -> "CustomEntityRecord | None":
+        """Update a record via ``$set`` of the given fields."""
+        pass
+
+    @abstractmethod
+    async def delete(
+        self,
+        path: str,
+    ) -> bool:
+        """Delete a single record. Returns True if a document was removed."""
+        pass
+
+    @abstractmethod
+    async def delete_by_type(
+        self,
+        entity_type: str,
+    ) -> int:
+        """Bulk-delete all records of a type. Returns the deleted count."""
+        pass
+
+    @abstractmethod
+    async def count(
+        self,
+        entity_type: str,
+        visibility_filter: dict[str, Any] | None = None,
+    ) -> int:
+        """Count records of a type, applying the SAME optional filter as list."""
         pass

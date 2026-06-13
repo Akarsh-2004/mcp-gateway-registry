@@ -102,6 +102,8 @@ Controls registry-vs-gateway integration and which tabs render in the UI. See [`
 |-----------|-----------------|-----------------------|----------------------|---------|
 | Deployment mode | `DEPLOYMENT_MODE` | `deployment_mode` | `registry.app.deploymentMode` | `with-gateway` (nginx integration) or `registry-only`. |
 | Registry mode | `REGISTRY_MODE` | `registry_mode` | `registry.app.registryMode` | `full`, `mcp-servers-only`, `agents-only`, `skills-only`. |
+| Internal-only deployment | `INTERNAL_ONLY_DEPLOYMENT` | `internal_only_deployment` | `registry.app.internalOnlyDeployment` | Telemetry label marking an internal/workshop deployment (default `false`). Does not change access control. |
+| Internal deployment type | `INTERNAL_DEPLOYMENT_TYPE` | `internal_deployment_type` | `registry.app.internalDeploymentType` | `none`/`dev`/`workshop`/`other` (default `none`); forced to `none` when internal-only is false, defaults to `dev` when internal-only is true and unset. |
 | Show Servers tab | `SHOW_SERVERS_TAB` | `show_servers_tab` | `registry.app.showServersTab` | UI tab toggle (AND-ed with `REGISTRY_MODE`). |
 | Show Virtual Servers tab | `SHOW_VIRTUAL_SERVERS_TAB` | `show_virtual_servers_tab` | `registry.app.showVirtualServersTab` | — |
 | Show Skills tab | `SHOW_SKILLS_TAB` | `show_skills_tab` | `registry.app.showSkillsTab` | — |
@@ -249,6 +251,10 @@ Single URL; disables itself when unset.
 |-----------|-----------------|-----------------------|----------------------|---------|
 | Provider type | `AUTH_PROVIDER` | Derived from `entra_enabled` / `okta_enabled` / `auth0_enabled` flags | `global.authProvider.type` | `keycloak`, `cognito`, `entra`, `okta`, `auth0`. |
 | IdP group filter prefixes | `IDP_GROUP_FILTER_PREFIX` | `idp_group_filter_prefix` | `registry.idpGroupFilterPrefix` | Comma-separated prefixes for IAM > Groups. |
+| IdP user-to-group fallback providers | `IDP_USER_GROUP_FALLBACK_ENABLED_PROVIDERS` | `idp_user_group_fallback_enabled_providers` | `registry.idpUserGroupFallbackEnabledProviders` / `auth-server.idpUserGroupFallbackEnabledProviders` | Issue #1127. Comma-separated IdP providers (e.g. `pingfederate`) for which the registry's local `idp_user_groups` collection is consulted to populate empty JWT groups claims. Empty disables fallback for all providers. Default: `pingfederate`. Read by both registry and auth-server. |
+| PingFederate admin URL | `PF_ADMIN_URL` | `pf_admin_url` | `registry.pingfederateAdmin.url` | Issue #1127. Admin API URL used by the registry to create OAuth clients and Simple PCV users. Default: dev-only `https://pingfederate:9999`; override for BYO PingFederate. Read by registry only. |
+| PingFederate admin user | `PF_ADMIN_USER` | `pf_admin_user` | `registry.pingfederateAdmin.user` | Issue #1127. Basic-auth user for the PF admin API. Default: dev-only `administrator`; override in production. Read by registry only. |
+| PingFederate admin password **(secret)** | `PF_ADMIN_PASS` | `pf_admin_pass` | `registry.pingfederateAdmin.password` / `registry.pingfederateAdmin.passwordExistingSecret` | Issue #1127. **Secret.** Basic-auth password for the PF admin API. Used by registry to create OAuth clients and Simple PCV users. Default: dev-only `2FederateM0re`; override in production. Wired through AWS Secrets Manager (Terraform) and `secretKeyRef` (Helm). Read by registry only. |
 
 ### 12a — Keycloak
 
@@ -357,6 +363,21 @@ Controls the per-user tool allowlist filter applied at the registry REST endpoin
 | Enable MCP tools/list filter | `MCP_TOOLS_LIST_FILTER_ENABLED` | `mcp_tools_list_filter_enabled` | `auth-server.app.mcpToolsListFilterEnabled`, `registry.app.mcpToolsListFilterEnabled` | Master switch for the MCP protocol tools/list filter. Default `true`. REST endpoints always filter regardless of this flag. |
 | MCP proxy max body bytes | `MCP_PROXY_MAX_BODY_BYTES` | `mcp_proxy_max_body_bytes` | `auth-server.app.mcpProxyMaxBodyBytes` | Upper bound (bytes) the auth-server proxy hop buffers when filtering tools/list; oversize returns HTTP 413. Default `2097152` (2 MiB). |
 | Tool-filter audit log level | `TOOL_FILTER_AUDIT_LOG_LEVEL` | `tool_filter_audit_log_level` | `auth-server.app.toolFilterAuditLogLevel`, `registry.app.toolFilterAuditLogLevel` | Launch-window log level for prune audit lines: `DEBUG`, `INFO`, or `WARNING`. Default `INFO`; flip to `DEBUG` after two quiet weeks in production. |
+
+---
+
+## Group 13b — Custom Entity Types
+
+Admin-defined, schema-driven catalog types (catalog-only; never proxied or executed). These are **registry-only** — the
+auth-server does not read them. All three values are non-sensitive. When the Main switch is off (default) the dynamic
+tabs and `/api/custom*` endpoints are not registered, so there is no behavior change.
+
+| Parameter                  | Docker (`.env`)                 | Terraform (`.tfvars`)           | Helm (`values.yaml`)                     | Purpose                                                                                                 |
+|----------------------------|---------------------------------|---------------------------------|------------------------------------------|---------------------------------------------------------------------------------------------------------|
+| Enable custom entity types | `CUSTOM_ENTITY_TYPES_ENABLED`   | `custom_entity_types_enabled`   | `registry.app.customEntityTypesEnabled`  | Main switch for dynamic tabs + `/api/custom*` endpoints. Default `false`; off = routers not registered. |
+| Descriptor cache TTL (s)   | `CUSTOM_TYPE_CACHE_TTL_SECONDS` | `custom_type_cache_ttl_seconds` | `registry.app.customTypeCacheTtlSeconds` | TTL for the in-process custom-type descriptor cache. Default `60`.                                      |
+| Max records per type       | `MAX_CUSTOM_RECORDS_PER_TYPE`   | `max_custom_records_per_type`   | `registry.app.maxCustomRecordsPerType`   | Soft (best-effort) cap on records per type; create rejected at cap. Default `1000` (0 = unlimited).     |
+| Max custom types           | `MAX_CUSTOM_TYPES`              | `max_custom_types`              | `registry.app.maxCustomTypes`            | Cap on number of custom types; type create rejected at limit. Default `50` (0 = unlimited).             |
 
 ---
 

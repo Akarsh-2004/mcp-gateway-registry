@@ -6,6 +6,7 @@ The MCP Gateway & Registry provides a powerful **Dynamic Tool Discovery and Invo
 
 - [Overview](#overview)
 - [How It Works](#how-it-works)
+- [Discovery Receipts and Context Budgets](#discovery-receipts-and-context-budgets)
 - [Architecture](#architecture)
 - [Usage Examples](#usage-examples)
 - [Agent Integration](#agent-integration)
@@ -35,6 +36,74 @@ The dynamic tool discovery process follows these steps:
 5. **Tool Invocation**: Agent uses the discovered tool information to invoke the appropriate MCP tool
 
 ![Dynamic Tool Discovery Flow](img/dynamic-tool-discovery-demo.gif)
+
+## Discovery Receipts and Context Budgets
+
+Dynamic discovery reduces up-front context bloat, but eval harnesses and agent-development workflows still need to know which result surface an agent actually saw. The `search_registry` and deprecated `intelligent_tool_finder` tools can return a compact `discovery_receipt` when callers set `include_discovery_receipt=true`; the default response remains unchanged to avoid adding model-facing tokens in production calls.
+
+The receipt is a caller-visible eval/debugging signal, not an operator audit transport. If you need audit evidence for production traffic, emit it server-side through structured logs or OTel events/spans instead of relying on the model or caller to persist it.
+
+A useful receipt answers four questions:
+
+1. **What was requested?** The natural-language discovery query.
+2. **What was exposed?** The tools, agents, or skills returned to the agent, with scores and the configured result limit.
+3. **What stayed out?** How many candidate results were withheld because they fell outside the result budget, plus the highest-scoring withheld items themselves (`top_withheld`) so you can tell whether the tool you wanted was a near miss or genuinely absent.
+4. **What was the outcome?** The overall `status` and a `stop_reason` describing why discovery ended.
+
+The receipt is built from the candidate results the registry returned, after de-duplicating tools that appear in both the top-level `tools` array and a server's `matching_tools` list. Candidates beyond the requested limit (`max_results` / `top_n`) become the withheld set; the full withheld count is always reported, while `top_withheld` lists at most the first few (capped by `MAX_WITHHELD_ITEMS`, default 5) to keep the receipt compact.
+
+Example shape:
+
+```json
+{
+  "event": "registry.discovery_receipt",
+  "query": "weather forecast for tomorrow",
+  "limits": {
+    "max_results": 2
+  },
+  "exposed_results": [
+    {
+      "asset_type": "tool",
+      "service_path": "/weather",
+      "name": "get_forecast",
+      "similarity_score": 0.91
+    },
+    {
+      "asset_type": "tool",
+      "service_path": "/weather",
+      "name": "get_current_conditions",
+      "similarity_score": 0.78
+    }
+  ],
+  "withheld": {
+    "candidate_result_count": 3,
+    "reason": "outside_intent_or_budget",
+    "top_withheld": [
+      {
+        "asset_type": "agent",
+        "service_path": "/travel-planner",
+        "name": "trip_advisor_agent",
+        "similarity_score": 0.55
+      },
+      {
+        "asset_type": "skill",
+        "service_path": "/packing",
+        "name": "what_to_pack",
+        "similarity_score": 0.41
+      }
+    ]
+  },
+  "status": "success",
+  "stop_reason": "results_returned"
+}
+```
+
+Keep discovery receipts compact and privacy-safe:
+
+- Store shapes, counts, categories, and scores; avoid raw user prompts beyond the discovery query unless your retention policy allows them.
+- The receipt records result metadata (asset type, service path, name, similarity score), never raw tool arguments or tool outputs. Keep it that way if you extend the shape.
+- Keep metrics lower-cardinality than receipts. Good metric labels include service family, status, and stop reason; avoid labels such as raw query text, user IDs, arguments, or result values.
+- Treat withheld results as a first-class signal. If useful tools, agents, or skills repeatedly show up in `top_withheld` for the same task, raise the discovery limit, split services, or improve descriptions so the right candidate ranks high enough to be exposed.
 
 ## Architecture
 

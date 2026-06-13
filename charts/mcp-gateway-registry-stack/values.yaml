@@ -96,9 +96,9 @@ mongodb-kubernetes:
 mongodb:
   enabled: true
   user: &mongoUser my-user # username for MongoDB
-  password: &mongoPassword CHANGEME # Set the password for the MongoDB user
+  password: &mongoPassword "" # Set the password for the MongoDB user or a random one is generated
   database: &mongoDatabase mcp_registry
-  existingPasswordSecret: "" # If set, skip creating my-user-password secret and use this name instead
+  existingPasswordSecret: "" # BYO operator user password. When set, the MongoDBCommunity operator's passwordSecretRef points here (key: password). When unset, the operator reads from mongo-credentials.DOCUMENTDB_PASSWORD.
   # connectionString: Full MongoDB URI override (MongoDB Atlas, externally-
   # managed replica sets, etc.). When set, takes precedence over user/
   # password/host-based assembly throughout the stack. For production,
@@ -236,6 +236,14 @@ registry:
     # Registry mode: full, skills-only, mcp-servers-only, agents-only
     registryMode: full
 
+    # Internal/workshop deployment classification (telemetry labels only; issue #1216).
+    # Tags a deployment as one of our own internal/workshop installs so it can be
+    # distinguished from community installs in telemetry. Does NOT change access control.
+    # internalDeploymentType is forced to "none" when internalOnlyDeployment is false, and
+    # defaults to "dev" when internalOnlyDeployment is true and left unset.
+    internalOnlyDeployment: false
+    internalDeploymentType: "none"
+
     # Tab visibility overrides (AND-ed with registryMode)
     showServersTab: true
     showVirtualServersTab: true
@@ -363,6 +371,11 @@ registry:
     mcpToolsListFilterEnabled: true    # Registry-side awareness of the MCP tools/list filter (also read by auth-server)
     toolFilterAuditLogLevel: "INFO"    # Audit log level for tool-prune events (DEBUG, INFO, WARNING)
 
+    # Custom entity types (admin-defined, schema-driven catalog types)
+    customEntityTypesEnabled: false    # Main switch for dynamic tabs + endpoints; off = no behavior change
+    customTypeCacheTtlSeconds: 60      # TTL (s) for the in-process custom-type descriptor cache
+    maxCustomRecordsPerType: 0         # Soft cap on records per type (0 = unlimited); rejects create at cap
+
     # PRM `scopes_supported` override. Default matches Keycloak-DCR setup
     # (Claude Code, Claude.ai, Cursor) — the three scopes are present in every
     # Keycloak realm by default, so DCR succeeds. Set to "" to derive from the
@@ -400,6 +413,26 @@ registry:
   # When set, only groups whose name starts with any of these prefixes are shown in IAM > Groups
   # Example: "mcp-,registry-,ai-"
   idpGroupFilterPrefix: ""
+
+  # IdP user-to-group fallback (issue #1127)
+  # Comma-separated list of IdP providers (e.g. pingfederate) for which the
+  # registry's local idp_user_groups collection is consulted to populate empty
+  # JWT groups claims. Empty string disables the fallback for all providers.
+  # Forwarded to both the registry and auth-server subcharts.
+  # Default: "pingfederate"
+  idpUserGroupFallbackEnabledProviders: "pingfederate"
+
+  # PingFederate Admin API (registry only).
+  # Used by the registry to call the PF admin API to create OAuth clients
+  # and Simple PCV users at runtime. The PASS is sensitive; the URL and
+  # USER are not. To source PF_ADMIN_PASS from an existing K8s Secret,
+  # set passwordExistingSecret instead of password.
+  pingfederateAdmin:
+    url: "https://pingfederate:9999"
+    user: "administrator"
+    password: ""
+    passwordExistingSecret: ""
+    passwordExistingSecretKey: "PF_ADMIN_PASS"
 
   ingress:
     enabled: true
@@ -506,6 +539,14 @@ auth-server:
     clientSecret: ""
     domain: ""  # Optional: custom Cognito domain
     region: "us-east-1"
+
+  # IdP user-to-group fallback (issue #1127)
+  # Comma-separated list of IdP providers (e.g. pingfederate) for which the
+  # registry's local idp_user_groups collection is consulted to populate empty
+  # JWT groups claims. Empty string disables the fallback for all providers.
+  # Keep in sync with registry.idpUserGroupFallbackEnabledProviders above.
+  # Default: "pingfederate"
+  idpUserGroupFallbackEnabledProviders: "pingfederate"
 
   nodeSelector: {}
 

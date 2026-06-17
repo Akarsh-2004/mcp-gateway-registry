@@ -196,6 +196,23 @@ class TestReindexEmbeddings:
 class TestGetStaleEmbeddings:
     """Tests for GET /api/admin/embeddings/stale."""
 
+    def test_unsupported_backend_returns_501(self, app, admin_client):
+        """Backends without stale scan support return 501."""
+        unsupported_repo = object()
+        with patch(
+            "registry.api.embeddings_admin_routes.get_search_repository",
+            return_value=unsupported_repo,
+        ):
+            response = admin_client.get("/api/admin/embeddings/stale")
+
+        assert response.status_code == 501
+        assert "not supported" in response.json()["detail"]
+
+    def test_non_admin_gets_403(self, non_admin_client, mock_search_repo):
+        """Non-admin users get 403."""
+        response = non_admin_client.get("/api/admin/embeddings/stale")
+        assert response.status_code == 403
+
     def test_returns_stale_documents(self, admin_client, mock_search_repo):
         """Returns orphaned embedding index entries."""
         mock_search_repo.find_stale_embeddings = AsyncMock(
@@ -224,6 +241,29 @@ class TestGetStaleEmbeddings:
 
 class TestCleanupStaleEmbeddings:
     """Tests for POST /api/admin/embeddings/stale/cleanup."""
+
+    def test_unsupported_backend_returns_501(self, app, admin_client):
+        """Backends without stale cleanup support return 501."""
+        unsupported_repo = object()
+        with patch(
+            "registry.api.embeddings_admin_routes.get_search_repository",
+            return_value=unsupported_repo,
+        ):
+            response = admin_client.post(
+                "/api/admin/embeddings/stale/cleanup",
+                json={"paths": ["/ghost-server"]},
+            )
+
+        assert response.status_code == 501
+        assert "not supported" in response.json()["detail"]
+
+    def test_non_admin_gets_403(self, non_admin_client, mock_search_repo):
+        """Non-admin users get 403."""
+        response = non_admin_client.post(
+            "/api/admin/embeddings/stale/cleanup",
+            json={"paths": ["/ghost-server"]},
+        )
+        assert response.status_code == 403
 
     def test_removes_stale_paths(self, admin_client, mock_search_repo):
         """Admin can remove orphaned embeddings by path."""

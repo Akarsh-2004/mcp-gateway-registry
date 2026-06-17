@@ -1,4 +1,4 @@
-"""Unit tests for stale embedding detection and filtering (issue #1145)."""
+"""Unit tests for stale embedding detection and admin cleanup (issue #1145)."""
 
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -11,35 +11,6 @@ def _make_repo() -> DocumentDBSearchRepository:
     repo = DocumentDBSearchRepository()
     repo._collection = AsyncMock()
     return repo
-
-
-@pytest.mark.unit
-class TestFilterDocsWithExistingSource:
-    """Tests for _filter_docs_with_existing_source."""
-
-    @pytest.mark.asyncio
-    async def test_drops_docs_missing_from_source(self):
-        repo = _make_repo()
-        docs = [
-            {"_id": "/server-a", "path": "/server-a", "entity_type": "mcp_server", "name": "A"},
-            {"_id": "/ghost", "path": "/ghost", "entity_type": "mcp_server", "name": "Ghost"},
-        ]
-
-        with patch.object(
-            repo,
-            "_fetch_existing_source_paths",
-            new_callable=AsyncMock,
-            return_value={"/server-a"},
-        ):
-            filtered = await repo._filter_docs_with_existing_source(docs)
-
-        assert len(filtered) == 1
-        assert filtered[0]["path"] == "/server-a"
-
-    @pytest.mark.asyncio
-    async def test_empty_input_returns_empty(self):
-        repo = _make_repo()
-        assert await repo._filter_docs_with_existing_source([]) == []
 
 
 @pytest.mark.unit
@@ -98,8 +69,62 @@ class TestRemoveStaleEmbeddings:
             repo,
             "remove_entity",
             new_callable=AsyncMock,
+            return_value=True,
         ) as mock_remove:
             result = await repo.remove_stale_embeddings(["/ghost-a", "/ghost-b"])
 
         assert result["success"] == 2
+        assert result["failed"] == 0
+        assert result["total"] == 2
         assert mock_remove.await_count == 2
+
+    @pytest.mark.asyncio
+    async def test_records_failure_when_remove_returns_false(self):
+        repo = _make_repo()
+
+        with patch.object(
+            repo,
+            "remove_entity",
+            new_callable=AsyncMock,
+            side_effect=[True, False],
+        ):
+            result = await repo.remove_stale_embeddings(["/ghost-a", "/ghost-b"])
+
+        assert result["success"] == 1
+        assert result["failed"] == 1
+        assert result["details"][1]["status"] == "failed"
+
+
+@pytest.mark.unit
+class TestRemoveEntity:
+    """Tests for remove_entity return value."""
+
+    @pytest.mark.asyncio
+    async def test_returns_true_when_deleted(self):
+        repo = _make_repo()
+        mock_collection = AsyncMock()
+        mock_collection.delete_one.return_value = MagicMock(deleted_count=1)
+        repo._collection = mock_collection
+
+        with patch.object(repo, "_get_collection", AsyncMock(return_value=mock_collection)):
+            assert await repo.remove_entity("/server-a") is True
+
+    @pytest.mark.asyncio
+    async def test_returns_true_when_not_found(self):
+        repo = _make_repo()
+        mock_collection = AsyncMock()
+        mock_collection.delete_one.return_value = MagicMock(deleted_count=0)
+        repo._collection = mock_collection
+
+        with patch.object(repo, "_get_collection", AsyncMock(return_value=mock_collection)):
+            assert await repo.remove_entity("/missing") is True
+
+    @pytest.mark.asyncio
+    async def test_returns_false_on_exception(self):
+        repo = _make_repo()
+        mock_collection = AsyncMock()
+        mock_collection.delete_one.side_effect = RuntimeError("db down")
+        repo._collection = mock_collection
+
+        with patch.object(repo, "_get_collection", AsyncMock(return_value=mock_collection)):
+            assert await repo.remove_entity("/server-a") is False

@@ -119,14 +119,6 @@ RRF_K: int = 60
 # 0.6 means no type gets more than 60% of total unless no competition.
 SOFT_CAP_RATIO: float = 0.6
 
-# Maps embedding entity_type values to source registry MongoDB collections.
-_SOURCE_COLLECTIONS_BY_ENTITY_TYPE: dict[str, str] = {
-    "mcp_server": "mcp_servers",
-    "a2a_agent": "mcp_agents",
-    "skill": "agent_skills",
-    "virtual_server": "virtual_servers",
-}
-
 
 def _tool_extraction_limit(
     max_results: int,
@@ -1360,7 +1352,6 @@ class DocumentDBSearchRepository(SearchRepositoryBase):
 
         cursor = collection.find(query_filter).limit(max_results * 5)
         results = await cursor.to_list(length=max_results * 5)
-        results = await self._filter_docs_with_existing_source(results)
 
         logger.info(
             "Tag-only search for %s returned %d documents",
@@ -1395,8 +1386,13 @@ class DocumentDBSearchRepository(SearchRepositoryBase):
     async def remove_entity(
         self,
         path: str,
-    ) -> None:
-        """Remove entity from search index."""
+    ) -> bool:
+        """Remove entity from search index.
+
+        Returns:
+            True if removal succeeded (including idempotent not-found).
+            False if removal failed.
+        """
         collection = await self._get_collection()
 
         try:
@@ -1405,90 +1401,10 @@ class DocumentDBSearchRepository(SearchRepositoryBase):
                 logger.info(f"Removed entity '{path}' from search index")
             else:
                 logger.warning(f"Entity '{path}' not found in search index")
+            return True
         except Exception as e:
             logger.error(f"Failed to remove entity from search index: {e}", exc_info=True)
-
-    async def _fetch_existing_source_paths(
-        self,
-        paths_by_type: dict[str, set[str]],
-    ) -> set[str]:
-        """Return paths that still exist in the source registry collections.
-
-        Args:
-            paths_by_type: entity_type -> set of paths to verify.
-
-        Returns:
-            Set of paths confirmed to exist in source collections.
-        """
-        if not paths_by_type:
-            return set()
-
-        db = await get_documentdb_client()
-        existing: set[str] = set()
-
-        for entity_type, paths in paths_by_type.items():
-            if not paths:
-                continue
-            col_key = _SOURCE_COLLECTIONS_BY_ENTITY_TYPE.get(entity_type)
-            if not col_key:
-                continue
-            collection = db[get_collection_name(col_key)]
-            cursor = collection.find(
-                {"_id": {"$in": list(paths)}},
-                {"_id": 1},
-            )
-            docs = await cursor.to_list(length=len(paths))
-            existing.update(doc["_id"] for doc in docs)
-
-        return existing
-
-    async def _filter_docs_with_existing_source(
-        self,
-        docs: list[dict],
-    ) -> list[dict]:
-        """Drop embedding-index documents whose source entity no longer exists.
-
-        Defense-in-depth for stale vectors left after failed delete-time
-        cleanup (issue #1145).
-        """
-        if not docs:
-            return docs
-
-        paths_by_type: dict[str, set[str]] = {}
-        for doc in docs:
-            entity_type = doc.get("entity_type", "")
-            path = doc.get("_id") or doc.get("path")
-            if not path or entity_type not in _SOURCE_COLLECTIONS_BY_ENTITY_TYPE:
-                continue
-            paths_by_type.setdefault(entity_type, set()).add(path)
-
-        if not paths_by_type:
-            return docs
-
-        existing_paths = await self._fetch_existing_source_paths(paths_by_type)
-
-        filtered: list[dict] = []
-        stale_paths: list[str] = []
-        for doc in docs:
-            entity_type = doc.get("entity_type", "")
-            path = doc.get("_id") or doc.get("path")
-            if (
-                entity_type in _SOURCE_COLLECTIONS_BY_ENTITY_TYPE
-                and path
-                and path not in existing_paths
-            ):
-                stale_paths.append(path)
-                continue
-            filtered.append(doc)
-
-        if stale_paths:
-            logger.warning(
-                "Filtered %d stale embedding(s) with no source document: %s",
-                len(stale_paths),
-                stale_paths[:10],
-            )
-
-        return filtered
+            return False
 
     async def find_missing_embeddings(self) -> dict[str, Any]:
         """Find documents in source collections that have no embedding indexed.
@@ -1551,6 +1467,10 @@ class DocumentDBSearchRepository(SearchRepositoryBase):
 
         Inverse of :meth:`find_missing_embeddings` — detects orphaned vectors
         left behind when delete-time cleanup failed (issue #1145).
+
+        NOTE: This performs an unbounded full scan of the embeddings collection
+        and all source collections. For very large registries, add pagination
+        (follow-up) before running this in production on a hot path.
 
         Returns:
             Dictionary with stale list, counts, and summary.
@@ -1617,8 +1537,15 @@ class DocumentDBSearchRepository(SearchRepositoryBase):
 
         for path in paths:
             try:
-                await self.remove_entity(path)
-                details.append({"path": path, "status": "success"})
+                removed = await self.remove_entity(path)
+                if removed:
+                    details.append({"path": path, "status": "success"})
+                else:
+                    details.append({
+                        "path": path,
+                        "status": "failed",
+                        "error": "Failed to remove stale embedding",
+                    })
             except Exception as e:
                 logger.error("Failed to remove stale embedding '%s': %s", path, e)
                 details.append({
@@ -1815,7 +1742,6 @@ class DocumentDBSearchRepository(SearchRepositoryBase):
             )
 
             all_docs = await cursor.to_list(length=None)
-            all_docs = await self._filter_docs_with_existing_source(all_docs)
             docs_with_embeddings = sum(1 for d in all_docs if d.get("embedding"))
             logger.info(
                 "Client-side search: Retrieved %d documents (%d with embeddings)",
@@ -2165,7 +2091,6 @@ class DocumentDBSearchRepository(SearchRepositoryBase):
 
         cursor = collection.aggregate(pipeline)
         results = await cursor.to_list(length=max(max_results * 3, 50))
-        results = await self._filter_docs_with_existing_source(results)
 
         grouped_results = self._format_lexical_results(results, max_results)
 
@@ -2555,8 +2480,6 @@ class DocumentDBSearchRepository(SearchRepositoryBase):
                 len(results),
                 keyword_added_count,
             )
-
-            results = await self._filter_docs_with_existing_source(results)
 
             # Combine vector and keyword signals using configured fusion method
             vector_ranked_docs = list(results)
